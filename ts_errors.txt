@@ -1,0 +1,6 @@
+src/editor/timeline/Timeline.tsx(15,111): error TS6133: 'removeKeyframe' is declared but its value is never read.
+src/editor/timeline/Timeline.tsx(15,140): error TS6133: 'removeLayer' is declared but its value is never read.
+src/editor/timeline/Timeline.tsx(15,153): error TS6133: 'undo' is declared but its value is never read.
+src/store/editorStore.ts(96,17): error TS2339: Property 'saveToHistory' does not exist on type 'EditorState'.
+src/store/editorStore.ts(139,17): error TS2339: Property 'saveToHistory' does not exist on type 'EditorState'.
+src/store/editorStore.ts(183,17): error TS2339: Property 'saveToHistory' does not exist on type 'EditorState'.
