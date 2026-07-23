@@ -9,12 +9,15 @@ import { serializeCanvas, downloadSvg } from './services/svgSerializer';
 import { exportProjectJson, downloadJson } from './services/animationExporter';
 
 export default function App() {
-    const { layers, selectedLayerId, addLayer, selectLayer } = useEditorStore();
+    const { layers, selectedLayerId, addLayer, selectLayer, loadFromStorage } = useEditorStore();
     const [canvasInstance, setCanvasInstance] = useState<fabric.Canvas | null>(null);
     const fabricCanvasRef = useRef<fabric.Canvas | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [showExportMenu, setShowExportMenu] = useState(false);
     const exportMenuRef = useRef<HTMLDivElement>(null);
+
+    // Auto-load project from localStorage
+    useEffect(() => { loadFromStorage(); }, []);
 
     useEffect(() => {
         const handleClickOutside = (e: MouseEvent) => {
@@ -58,7 +61,7 @@ export default function App() {
         const canvas = fabricCanvasRef.current;
         const state = useEditorStore.getState();
         if (state.layers.length === 0) { alert('No layers to export.'); return; }
-        const json = exportProjectJson(state.layers, state.keyframes, state.duration, canvas);
+        const json = exportProjectJson(state.layers, state.animatedObjects, state.duration, canvas);
         downloadJson(json, 'pro-animation.json');
         setShowExportMenu(false);
     };

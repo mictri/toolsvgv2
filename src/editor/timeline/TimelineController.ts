@@ -58,8 +58,8 @@ export class TimelineController {
     }
 
     recompile() {
-        const { keyframes } = useEditorStore.getState();
-        compileTimeline(keyframes, this.fabricCanvas);
+        const { animatedObjects } = useEditorStore.getState();
+        compileTimeline(animatedObjects, this.fabricCanvas);
     }
 
     private startRafLoop = () => {

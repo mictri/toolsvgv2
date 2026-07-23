@@ -1,84 +1,91 @@
 import { fabric } from 'fabric';
 import { globalGsapTimeline } from './gsapInstance';
-import { KeyframeNode, useEditorStore } from '../../store/editorStore';
+import { AnimatedObject, useEditorStore } from '../../store/editorStore';
 
 /**
- * compileTimeline: Xây dựng GSAP timeline từ danh sách KeyframeNode.
- *
- * THAY ĐỔI QUAN TRỌNG:
- *   - KHÔNG dùng targetObj.set() để gán trạng thái đầu (vì sẽ ghi đè trạng thái
- *     chỉnh sửa hiện tại của object trên Canvas).
- *   - Thay vào đó, dùng globalGsapTimeline.set() (tương đương to() với duration=0)
- *     để GSAP biết trạng thái tại time=0 mà không động đến object thật.
- *   - Kết quả: người dùng có thể chỉnh màu/vị trí/scale... trên Canvas ngay lập tức,
- *     và khi Play thì GSAP chạy từ keyframe đầu tiên.
- *   - Sau khi rebuild, seek GSAP timeline về currentTime để đồng bộ playhead.
+ * Convert a PropertyTrack value into GSAP tween vars for the given property.
  */
-export const compileTimeline = (keyframes: KeyframeNode[], fabricCanvas: fabric.Canvas | null) => {
+function trackValueToGSAP(property: string, value: any): Record<string, any> {
+    switch (property) {
+        case 'position': return { left: value.left, top: value.top };
+        case 'scale': return { scaleX: value.scaleX, scaleY: value.scaleY };
+        case 'rotate': return { angle: value };
+        case 'opacity': return { opacity: value };
+        case 'skew': return { skewX: value.skewX, skewY: value.skewY };
+        case 'morph': return { path: value };
+        case 'fillColor': return { fill: value };
+        case 'fillOpacity': return { fillOpacity: value };
+        case 'strokeColor': return { stroke: value };
+        case 'strokeOpacity': return { strokeOpacity: value };
+        case 'strokeWidth': return { strokeWidth: value };
+        case 'strokeOffset': return { strokeDashOffset: value };
+        case 'strokeDashes': return { strokeDashArray: value };
+        default: return {};
+    }
+}
+
+/**
+ * compileTimeline: Xây dựng GSAP master timeline từ các AnimatedObject
+ * với per-property tracks, composite tất cả vào một timeline duy nhất.
+ */
+export const compileTimeline = (
+    animatedObjects: AnimatedObject[],
+    fabricCanvas: fabric.Canvas | null,
+) => {
     if (!fabricCanvas) return;
 
-    // 1. Reset timeline hiện tại
     globalGsapTimeline.clear();
-
-    // 2. Lấy danh sách các Layer có dữ liệu Keyframe
-    const uniqueLayerIds = Array.from(new Set(keyframes.map((k) => k.layerId)));
-
-    uniqueLayerIds.forEach((layerId) => {
-        const targetObj = fabricCanvas.getObjects().find((obj) => obj.data?.id === layerId);
-        if (!targetObj) return;
-
-        // Lọc và sắp xếp các keyframe của layer này theo mốc thời gian tăng dần
-        const layerKfs = keyframes
-            .filter((k) => k.layerId === layerId)
-            .sort((a, b) => a.time - b.time);
-
-        if (layerKfs.length === 0) return;
-
-        // 3. Đặt trạng thái tại time=0 bằng GSAP.set() (không động đến object thật)
-        const firstKf = layerKfs[0];
-        globalGsapTimeline.set(targetObj, {
-            left: firstKf.transform.left,
-            top: firstKf.transform.top,
-            angle: firstKf.transform.angle,
-            scaleX: firstKf.transform.scaleX,
-            scaleY: firstKf.transform.scaleY,
-            skewX: firstKf.transform.skewX,
-            skewY: firstKf.transform.skewY,
-            opacity: firstKf.transform.opacity,
-            fill: firstKf.transform.fill,
-            stroke: firstKf.transform.stroke,
-        }, 0);
-
-        // 4. Xây dựng chuỗi chuyển động liên hoàn (Tweening Chain)
-        for (let i = 0; i < layerKfs.length - 1; i++) {
-            const currentKf = layerKfs[i];
-            const nextKf = layerKfs[i + 1];
-            const segmentDuration = nextKf.time - currentKf.time;
-
-            if (segmentDuration <= 0) continue;
-
-            globalGsapTimeline.to(targetObj, {
-                left: nextKf.transform.left,
-                top: nextKf.transform.top,
-                angle: nextKf.transform.angle,
-                scaleX: nextKf.transform.scaleX,
-                scaleY: nextKf.transform.scaleY,
-                skewX: nextKf.transform.skewX,
-                skewY: nextKf.transform.skewY,
-                opacity: nextKf.transform.opacity,
-                fill: nextKf.transform.fill,
-                stroke: nextKf.transform.stroke,
-                duration: segmentDuration,
-                ease: nextKf.easing === 'none' ? 'none' : nextKf.easing,
-                onUpdate: () => {
-                    fabricCanvas.renderAll();
-                },
-            }, currentKf.time);
-        }
+    globalGsapTimeline.eventCallback('onUpdate', () => {
+        fabricCanvas.renderAll();
     });
 
-    // 5. Seek về currentTime để GSAP timeline đồng bộ với playhead hiện tại
-    //    (compileTimeline có thể được gọi trong lúc đang edit tại một vị trí thời gian nhất định)
+    let maxTime = 0;
+
+    for (const ao of animatedObjects) {
+        const targetObj = fabricCanvas.getObjects().find((obj) => obj.data?.id === ao.id);
+        if (!targetObj) continue;
+
+        for (const track of ao.tracks) {
+            if (!track.enabled || track.keyframes.length < 2) continue;
+
+            const sorted = [...track.keyframes].sort((a, b) => a.time - b.time);
+
+            // Đặt trạng thái tại time=0
+            const firstVal = sorted[0];
+            const firstVars = trackValueToGSAP(track.property, firstVal.value);
+            globalGsapTimeline.set(targetObj, firstVars, Math.max(0, firstVal.time));
+
+            // Xây chuỗi keyframes
+            for (let i = 0; i < sorted.length - 1; i++) {
+                const curr = sorted[i];
+                const next = sorted[i + 1];
+                const segDuration = next.time - curr.time;
+                if (segDuration <= 0) continue;
+
+                const toVars: Record<string, any> = {
+                    ...trackValueToGSAP(track.property, next.value),
+                    duration: segDuration,
+                    ease: next.easing === 'none' ? 'none' : next.easing,
+                    onUpdate: () => {
+                        if (targetObj.type === 'line') targetObj.setCoords();
+                    },
+                };
+                globalGsapTimeline.to(targetObj, toVars, Math.max(0, curr.time));
+
+                if (next.time > maxTime) maxTime = next.time;
+            }
+        }
+    }
+
+    // Cập nhật duration nếu cần
+    if (maxTime > 0) {
+        const store = useEditorStore.getState();
+        if (maxTime > store.duration) {
+            useEditorStore.setState({ duration: Math.ceil(maxTime + 1) });
+        }
+    }
+
+    // Seek về currentTime
     const currentTime = useEditorStore.getState().currentTime;
     globalGsapTimeline.time(currentTime);
     fabricCanvas.renderAll();
