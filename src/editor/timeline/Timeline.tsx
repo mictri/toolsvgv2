@@ -1,8 +1,8 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { globalGsapTimeline } from './gsapInstance';
 import {
-    useEditorStore, EASING_OPTIONS, PROPERTY_TYPES, PROPERTY_LABELS,
-    PROPERTY_ICONS, PROPERTY_PRESETS, AnimatableProperty,
+    useEditorStore, PROPERTY_LABELS,
+    PROPERTY_ICONS, SUBTRACK_EASING_OPTIONS, AnimatableProperty,
 } from '../../store/editorStore';
 import { compileTimeline } from './timelineCompiler';
 import { fabric } from 'fabric';
@@ -18,19 +18,16 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
         animatedObjects,
         setIsPlaying, setCurrentTime, setDuration, setLoopMode, setTimelineZoom,
         addPropertyTrack, addKeyframeToTrack, updateKeyframeInTrack,
-        removeKeyframeFromTrack, setAnimatedObjectExpanded,
-        selectKeyframe, selectLayer, saveToStorage, applyPropertyPreset,
+        removeKeyframeFromTrack, removeSubTrack, setAnimatedObjectExpanded,
+        selectKeyframe, selectLayer, saveToStorage,
     } = useEditorStore();
 
+    const LABEL_WIDTH = 256; // w-64 = 16rem = 256px
     const requestRef = useRef<number | null>(null);
     const trackRef = useRef<HTMLDivElement | null>(null);
     const isDraggingScrub = useRef(false);
-    const [showEasingPicker, setShowEasingPicker] = useState(false);
     const [showAddProperty, setShowAddProperty] = useState(false);
-    const [activeTrackPreset, setActiveTrackPreset] = useState<string | null>(null);
-    const easingRef = useRef<HTMLDivElement>(null);
     const addPropertyRef = useRef<HTMLDivElement>(null);
-    const trackPresetRef = useRef<HTMLDivElement>(null);
 
     const clampTime = useCallback((time: number) => Math.min(duration, Math.max(0, time)), [duration]);
 
@@ -38,9 +35,7 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
 
     useEffect(() => {
         const handleClickOutside = (e: MouseEvent) => {
-            if (easingRef.current && !easingRef.current.contains(e.target as Node)) setShowEasingPicker(false);
             if (addPropertyRef.current && !addPropertyRef.current.contains(e.target as Node)) setShowAddProperty(false);
-            if (trackPresetRef.current && !trackPresetRef.current.contains(e.target as Node)) setActiveTrackPreset(null);
         };
         document.addEventListener('mousedown', handleClickOutside);
         return () => document.removeEventListener('mousedown', handleClickOutside);
@@ -94,11 +89,34 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
         window.dispatchEvent(new CustomEvent('timeline-scrub', { detail: { time: roundedTime } }));
     };
 
+    const getCurrentPropertyValue = useCallback((layerId: string, property: AnimatableProperty): any => {
+        const obj = fabricCanvas?.getObjects().find(o => o.data?.id === layerId);
+        if (!obj) return undefined;
+        switch (property) {
+            case 'position': return { left: Math.round(obj.left || 0), top: Math.round(obj.top || 0) };
+            case 'scale': return { scaleX: Number((obj.scaleX ?? 1).toFixed(3)), scaleY: Number((obj.scaleY ?? 1).toFixed(3)) };
+            case 'rotate': return Math.round(obj.angle || 0);
+            case 'opacity': return Number((obj.opacity ?? 1).toFixed(2));
+            case 'skew': return { skewX: obj.skewX ?? 0, skewY: obj.skewY ?? 0 };
+            case 'morph': return (obj as any).path ?? '';
+            case 'fillColor': return (obj.fill as string) ?? '#6366f1';
+            case 'fillOpacity': return (obj as any).fillOpacity ?? 1;
+            case 'strokeColor': return obj.stroke ?? '#4f46e5';
+            case 'strokeOpacity': return (obj as any).strokeOpacity ?? 1;
+            case 'strokeWidth': return obj.strokeWidth ?? 0;
+            case 'strokeOffset': return (obj as any).strokeDashOffset ?? 0;
+            case 'strokeDashes': return (obj as any).strokeDashArray ?? [0];
+            default: return 0;
+        }
+    }, [fabricCanvas]);
+
     const handleTrackMouseDown = (e: React.MouseEvent) => {
         if (e.button !== 0) return;
         const rect = trackRef.current?.getBoundingClientRect();
         if (!rect) return;
-        const calcTime = (clientX: number) => clampTime(((clientX - rect.left) / rect.width) * duration);
+        const trackLeft = rect.left + LABEL_WIDTH;
+        const trackWidth = rect.width - LABEL_WIDTH;
+        const calcTime = (clientX: number) => clampTime(((clientX - trackLeft) / trackWidth) * duration);
         handleScrub(calcTime(e.clientX));
         selectKeyframe(null);
         isDraggingScrub.current = true;
@@ -113,8 +131,10 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
         selectKeyframe(kfId);
         const rect = trackRef.current?.getBoundingClientRect();
         if (!rect) return;
+        const trackLeft = rect.left + LABEL_WIDTH;
+        const trackWidth = rect.width - LABEL_WIDTH;
         const onMouseMove = (me: MouseEvent) => {
-            const pct = Math.max(0, Math.min(1, (me.clientX - rect.left) / rect.width));
+            const pct = Math.max(0, Math.min(1, (me.clientX - trackLeft) / trackWidth));
             const newTime = Math.round(pct * duration * 100) / 100;
             for (const ao of useEditorStore.getState().animatedObjects) {
                 for (const track of ao.tracks) {
@@ -138,6 +158,7 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                 for (const track of ao.tracks) {
                     if (track.keyframes.find(k => k.id === selectedKeyframeId)) {
                         removeKeyframeFromTrack(ao.id, track.property, selectedKeyframeId);
+                        selectKeyframe(null);
                         compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
                         return;
                     }
@@ -150,51 +171,10 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
         const layerId = selectedLayerId;
         if (!layerId) return;
         addPropertyTrack(layerId, property);
-        const obj = fabricCanvas?.getObjects().find(o => o.data?.id === layerId);
-        if (obj) {
-            let value: any;
-            switch (property) {
-                case 'position': value = { left: Math.round(obj.left || 0), top: Math.round(obj.top || 0) }; break;
-                case 'scale': value = { scaleX: Number((obj.scaleX ?? 1).toFixed(3)), scaleY: Number((obj.scaleY ?? 1).toFixed(3)) }; break;
-                case 'rotate': value = Math.round(obj.angle || 0); break;
-                case 'opacity': value = Number((obj.opacity ?? 1).toFixed(2)); break;
-                case 'skew': value = { skewX: obj.skewX ?? 0, skewY: obj.skewY ?? 0 }; break;
-                case 'morph': value = (obj as any).path ?? ''; break;
-                case 'fillColor': value = (obj.fill as string) ?? '#6366f1'; break;
-                case 'fillOpacity': value = (obj as any).fillOpacity ?? 1; break;
-                case 'strokeColor': value = obj.stroke ?? '#4f46e5'; break;
-                case 'strokeOpacity': value = (obj as any).strokeOpacity ?? 1; break;
-                case 'strokeWidth': value = obj.strokeWidth ?? 0; break;
-                case 'strokeOffset': value = (obj as any).strokeDashOffset ?? 0; break;
-                case 'strokeDashes': value = (obj as any).strokeDashArray ?? [0]; break;
-                default: value = 0;
-            }
-            addKeyframeToTrack(layerId, property, 0, value, 'none');
-            addKeyframeToTrack(layerId, property, duration, value, 'none');
-        }
         setShowAddProperty(false);
-        compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
-    };
-
-    const handleApplyTrackPreset = (property: AnimatableProperty, presetId: string) => {
-        if (!selectedLayerId || !fabricCanvas) return;
-        applyPropertyPreset(property, presetId, selectedLayerId, currentTime, fabricCanvas);
-        compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
-        setActiveTrackPreset(null);
     };
 
     const playheadPercent = Math.min(100, Math.max(0, (currentTime / duration) * 100));
-
-    const selectedKf = (() => {
-        if (!selectedKeyframeId) return null;
-        for (const ao of animatedObjects) {
-            for (const track of ao.tracks) {
-                const kf = track.keyframes.find(k => k.id === selectedKeyframeId);
-                if (kf) return { kf, layerId: ao.id, property: track.property };
-            }
-        }
-        return null;
-    })();
 
     const timeMarkers: number[] = [];
     const markerCount = Math.max(5, Math.round(duration));
@@ -253,13 +233,33 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                             <span className="text-xs font-bold">+</span>Animate<span className="text-[9px] opacity-70">▲</span>
                         </button>
                         {showAddProperty && selectedLayerId && (
-                            <div className="absolute bottom-full right-0 mb-2 w-44 max-h-72 overflow-y-auto rounded-lg bg-slate-900 border border-slate-700 shadow-2xl z-[999] p-1.5">
-                                {PROPERTY_TYPES.map((prop) => (
-                                    <button key={prop} onClick={() => handleAddProperty(prop)}
-                                        className="flex items-center gap-2 w-full text-left px-2 py-1.5 text-xs text-slate-300 hover:bg-slate-800 rounded-md transition-colors">
-                                        <span>{PROPERTY_ICONS[prop]}</span>
-                                        <span>{PROPERTY_LABELS[prop]}</span>
-                                    </button>
+                            <div className="absolute bottom-full right-0 mb-2 w-48 max-h-80 overflow-y-auto rounded-lg bg-slate-900 border border-slate-700 shadow-2xl z-[999] p-1.5">
+                                {[
+                                    { label: 'TRANSFORMS', props: ['position', 'scale', 'rotate', 'skew'] as AnimatableProperty[] },
+                                    { label: 'APPEARANCE', props: ['opacity', 'fillColor'] as AnimatableProperty[] },
+                                    { label: 'STROKE', props: ['strokeColor', 'strokeOpacity', 'strokeWidth', 'strokeOffset', 'strokeDashes'] as AnimatableProperty[] },
+                                    { label: 'ADVANCED', props: ['morph'] as AnimatableProperty[] },
+                                ].map((group, gi) => (
+                                    <div key={group.label}>
+                                        {gi > 0 && <div className="h-px bg-slate-800 mx-1 my-1.5" />}
+                                        <div className="text-[8px] font-bold text-slate-600 uppercase tracking-wider px-2 py-1">{group.label}</div>
+                                        {group.props.map((prop) => {
+                                            const isMorph = prop === 'morph';
+                                            const obj = fabricCanvas?.getObjects().find(o => o.data?.id === selectedLayerId);
+                                            const canMorph = isMorph ? obj?.type === 'path' : true;
+                                            return (
+                                                <button key={prop}
+                                                    onClick={() => canMorph && handleAddProperty(prop)}
+                                                    disabled={isMorph && !canMorph}
+                                                    title={isMorph && !canMorph ? 'Convert to Path to enable Morph' : PROPERTY_LABELS[prop]}
+                                                    className={`flex items-center gap-2 w-full text-left px-2 py-1.5 text-xs rounded-md transition-colors ${!canMorph ? 'text-slate-700 cursor-not-allowed' : 'text-slate-300 hover:bg-slate-800'}`}>
+                                                    <span className={!canMorph ? 'opacity-30' : ''}>{PROPERTY_ICONS[prop]}</span>
+                                                    <span className={!canMorph ? 'opacity-30' : ''}>{PROPERTY_LABELS[prop]}</span>
+                                                    {isMorph && !canMorph && <span className="ml-auto text-[8px] text-slate-700 italic">(required)</span>}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
                                 ))}
                             </div>
                         )}
@@ -271,7 +271,7 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
             <div className="flex flex-col w-full bg-slate-900/20 rounded border border-slate-900 overflow-hidden">
                 {/* Ruler Header */}
                 <div className="flex w-full border-b border-slate-900 bg-slate-950/40 text-[10px] text-slate-500 font-mono h-6 items-center">
-                    <div className="w-56 px-3 font-semibold border-r border-slate-900 text-[11px] shrink-0">Animation</div>
+                    <div className="w-64 px-3 font-semibold border-r border-slate-900 text-[11px] shrink-0">Animation</div>
                     <div className="flex-1 relative h-full overflow-hidden" style={{ zoom: timelineZoom / 100 }}>
                         {timeMarkers.map((t, i) => (
                             <span key={i}
@@ -294,9 +294,9 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                         onMouseDown={handleTrackMouseDown}>
                         {/* Playhead line spanning all tracks */}
                         <div className="absolute top-0 bottom-0 w-0.5 bg-rose-400 z-30 pointer-events-none shadow-lg shadow-rose-500/50"
-                            style={{ left: `${playheadPercent}%` }} />
+                            style={{ left: `calc(${LABEL_WIDTH}px + (100% - ${LABEL_WIDTH}px) * ${playheadPercent / 100})` }} />
                         <div className="absolute top-0 w-3 h-3 -ml-1.5 -mt-1 z-40 cursor-pointer"
-                            style={{ left: `${playheadPercent}%` }} />
+                            style={{ left: `calc(${LABEL_WIDTH}px + (100% - ${LABEL_WIDTH}px) * ${playheadPercent / 100})` }} />
 
                         {animatedObjects.map((ao) => {
                             const layer = layers.find(l => l.id === ao.id);
@@ -313,7 +313,7 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                                             const obj = fabricCanvas?.getObjects().find(o => o.data?.id === ao.id);
                                             if (obj) fabricCanvas?.setActiveObject(obj).renderAll();
                                         }}>
-                                        <div className="w-56 px-2 border-r border-slate-900 flex items-center gap-1 bg-slate-950/20 h-full shrink-0">
+                                        <div className="w-64 px-2 border-r border-slate-900 flex items-center gap-1 bg-slate-950/20 h-full shrink-0">
                                             <button onClick={(e) => { e.stopPropagation(); setAnimatedObjectExpanded(ao.id, !isExpanded); }}
                                                 className="text-[10px] text-slate-500 hover:text-white w-3">
                                                 {isExpanded ? '▼' : '▶'}
@@ -327,39 +327,61 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
 
                                     {/* Child Property Track Rows */}
                                     {isExpanded && ao.tracks.map((track) => {
-                                        const trackKey = `${ao.id}:${track.property}`;
-                                        const presets = PROPERTY_PRESETS[track.property] || [];
                                         return (
                                         <div key={track.property}
                                             className={`flex w-full h-7 items-center transition-colors border-t border-slate-900/30 ${!track.enabled ? 'opacity-40' : ''}`}>
-                                            <div className="w-56 px-2 border-r border-slate-900 flex items-center gap-1 bg-slate-950/10 h-full shrink-0 pl-8">
+                                            <div className="w-64 px-2 border-r border-slate-900 flex items-center gap-1 bg-slate-950/10 h-full shrink-0 pl-8">
                                                 <button onClick={(e) => { e.stopPropagation(); useEditorStore.getState().toggleTrackEnabled(ao.id, track.property); }}
                                                     className="text-[9px] text-slate-600 hover:text-white">
                                                     {track.enabled ? '👁' : '◡'}
                                                 </button>
-                                                <span className="text-[10px] text-slate-500 font-mono flex items-center gap-1">
-                                                    <span>{PROPERTY_ICONS[track.property]}</span>
-                                                    <span>{PROPERTY_LABELS[track.property]}</span>
+                                                <span className="text-[10px] text-slate-500 font-mono shrink-0">
+                                                    {PROPERTY_LABELS[track.property]}
                                                 </span>
-                                                {/* Per-track Presets button */}
-                                                {presets.length > 0 && (
-                                                    <div className="relative ml-1" ref={trackPresetRef}>
-                                                        <button onClick={(e) => { e.stopPropagation(); setActiveTrackPreset(activeTrackPreset === trackKey ? null : trackKey); }}
-                                                            className="text-[9px] text-amber-400 hover:text-amber-300 bg-slate-800/60 hover:bg-slate-700/60 px-1 py-0.5 rounded flex items-center gap-0.5">
-                                                            ✨<span className="text-[7px] opacity-70">▼</span>
-                                                        </button>
-                                                        {activeTrackPreset === trackKey && (
-                                                            <div className="absolute bottom-full left-0 mb-2 w-36 rounded-lg bg-slate-900 border border-slate-700 shadow-2xl z-[999] p-1">
-                                                                {presets.map((p) => (
-                                                                    <button key={p.id} onClick={(e) => { e.stopPropagation(); handleApplyTrackPreset(track.property, p.id); }}
-                                                                        className="flex items-center gap-2 w-full text-left px-2 py-1.5 text-[11px] text-slate-300 hover:bg-slate-800 rounded-md transition-colors">
-                                                                        <span>{p.icon}</span><span>{p.label}</span>
-                                                                    </button>
-                                                                ))}
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                )}
+                                                {/* Per-track Easing Select */}
+                                                <select
+                                                    value={selectedKeyframeId && track.keyframes.some(k => k.id === selectedKeyframeId) ? track.keyframes.find(k => k.id === selectedKeyframeId)!.easing : track.defaultEasing}
+                                                    onChange={(e) => {
+                                                        e.stopPropagation();
+                                                        const kfOnTrack = selectedKeyframeId && track.keyframes.find(k => k.id === selectedKeyframeId);
+                                                        if (kfOnTrack) {
+                                                            updateKeyframeInTrack(ao.id, track.property, kfOnTrack.id, { easing: e.target.value });
+                                                        } else {
+                                                            useEditorStore.getState().updateSubTrackEasing(ao.id, track.property, e.target.value);
+                                                        }
+                                                        compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
+                                                    }}
+                                                    onClick={(e) => e.stopPropagation()}
+                                                    className="text-[9px] bg-slate-800 border border-slate-700 rounded text-slate-300 min-w-[110px] cursor-pointer focus:outline-none focus:border-indigo-500 ml-1 z-30">
+                                                    {SUBTRACK_EASING_OPTIONS.map(opt => (
+                                                        <option key={opt.id} value={opt.id} className="text-slate-300">{opt.label}</option>
+                                                    ))}
+                                                </select>
+                                                {/* Per-track Add Keyframe */}
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        const value = getCurrentPropertyValue(ao.id, track.property);
+                                                        if (value !== undefined) {
+                                                            addKeyframeToTrack(ao.id, track.property, currentTime, value, track.defaultEasing);
+                                                            compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
+                                                        }
+                                                    }}
+                                                    className="text-[10px] font-semibold text-emerald-400 hover:text-white bg-emerald-950/50 hover:bg-emerald-600 border border-emerald-500/50 px-1.5 py-0.5 rounded ml-1 transition-colors shrink-0"
+                                                    title="Add keyframe at current playhead">
+                                                    + Add
+                                                </button>
+                                                {/* Delete Sub-track */}
+                                                <button onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    e.preventDefault();
+                                                    removeSubTrack(ao.id, track.property);
+                                                    compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
+                                                }}
+                                                    className="text-slate-500 hover:text-rose-400 hover:bg-slate-800/80 rounded p-1 transition-colors ml-0.5"
+                                                    title="Remove track">
+                                                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                                                </button>
                                                 <span className="text-[9px] text-slate-600 ml-auto">{track.keyframes.length}k</span>
                                             </div>
                                             <div className="flex-1 h-full relative cursor-pointer overflow-hidden"
@@ -368,6 +390,16 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                                                     const rect = e.currentTarget.getBoundingClientRect();
                                                     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
                                                     handleScrub(pct * duration);
+                                                }}
+                                                onDoubleClick={(e) => {
+                                                    const rect = e.currentTarget.getBoundingClientRect();
+                                                    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                                                    const time = Math.round(pct * duration * 100) / 100;
+                                                    const value = getCurrentPropertyValue(ao.id, track.property);
+                                                    if (value !== undefined) {
+                                                        addKeyframeToTrack(ao.id, track.property, time, value, 'power2.out');
+                                                        compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
+                                                    }
                                                 }}>
                                                 {track.keyframes.map((kf) => {
                                                     const kfPct = Math.min(100, Math.max(0, (kf.time / duration) * 100));
@@ -392,64 +424,6 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                 )}
             </div>
 
-            {/* Easing Editor Footer */}
-            {selectedKf && (
-                <div className="flex items-center justify-between bg-slate-900/40 rounded border border-slate-800 px-3 py-2">
-                    <div className="flex items-center gap-3">
-                        <span className="text-[10px] font-semibold text-indigo-400 uppercase">Easing</span>
-                        <div className="relative" ref={easingRef}>
-                            <button onClick={() => setShowEasingPicker(!showEasingPicker)}
-                                className="bg-slate-800 hover:bg-slate-700 px-2.5 py-1 rounded text-xs font-mono text-slate-200 flex items-center gap-2 border border-slate-700">
-                                <svg width="28" height="14" viewBox="0 0 100 50" className="shrink-0">
-                                    <rect width="100" height="50" rx="4" fill="#1e293b" />
-                                    {(() => {
-                                        const opt = EASING_OPTIONS.flatMap(g => g.items).find(i => i.id === selectedKf.kf.easing);
-                                        return opt ? <path d={opt.curve} fill="none" stroke="#818cf8" strokeWidth="3" strokeLinecap="round" /> : null;
-                                    })()}
-                                </svg>
-                                <span>{selectedKf.kf.easing}</span>
-                            </button>
-                            {showEasingPicker && (
-                                <div className="absolute bottom-full left-0 mb-2 w-64 max-h-80 overflow-y-auto rounded-lg bg-slate-900 border border-slate-800 shadow-xl z-[999] p-2">
-                                    {EASING_OPTIONS.map((group) => (
-                                        <div key={group.group} className="mb-1">
-                                            <div className="text-[10px] font-bold text-slate-500 uppercase px-2 py-1">{group.group}</div>
-                                            {group.items.map((item) => (
-                                                <button key={item.id}
-                                                    onClick={() => {
-                                                        updateKeyframeInTrack(selectedKf.layerId, selectedKf.property, selectedKf.kf.id, { easing: item.id });
-                                                        compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
-                                                        setShowEasingPicker(false);
-                                                    }}
-                                                    className={`flex items-center gap-2 w-full text-left px-2 py-1.5 text-xs rounded-md transition-colors ${selectedKf.kf.easing === item.id ? 'bg-indigo-950/40 text-indigo-300' : 'text-slate-300 hover:bg-slate-800'}`}>
-                                                    <svg width="24" height="14" viewBox="0 0 100 50" className="shrink-0">
-                                                        <rect width="100" height="50" rx="3" fill="#1e293b" />
-                                                        <path d={item.curve} fill="none" stroke={selectedKf.kf.easing === item.id ? '#818cf8' : '#64748b'} strokeWidth="3" strokeLinecap="round" />
-                                                    </svg>
-                                                    <span>{item.label}</span>
-                                                </button>
-                                            ))}
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                    <div className="text-[11px] text-slate-500 font-mono">
-                        <span className="text-indigo-400">{PROPERTY_LABELS[selectedKf.property]}</span>
-                        <span className="mx-1">|</span>
-                        <span className="text-rose-400">{selectedKf.kf.time.toFixed(2)}s</span>
-                        <span className="mx-1">|</span>
-                        <button onClick={() => { selectKeyframe(null); }} className="text-slate-500 hover:text-white">✕</button>
-                    </div>
-                </div>
-            )}
-
-            {selectedKeyframeId && (
-                <div className="text-[11px] text-rose-400 text-center font-mono">
-                    🔴 Keyframe selected. <span className="underline font-bold">[Delete]</span> to remove.
-                </div>
-            )}
         </div>
     );
 }

@@ -1,12 +1,29 @@
 import { create } from 'zustand';
-import { fabric } from 'fabric';
 
 export interface Layer {
     id: string;
     name: string;
-    type: 'rect' | 'ellipse' | 'polygon' | 'star' | 'line' | 'path' | 'svg' | 'text' | 'image';
+    type: 'rect' | 'ellipse' | 'polygon' | 'star' | 'line' | 'path' | 'svg' | 'text' | 'image' | 'group';
     visible: boolean;
     locked: boolean;
+    parentId: string | null;
+    originalId: string;
+    childrenIds: string[];
+}
+
+export type LayerInput = Pick<Layer, 'id' | 'name' | 'type'> & Partial<Pick<Layer, 'visible' | 'locked' | 'parentId' | 'originalId' | 'childrenIds'>>;
+
+export function createLayer(input: LayerInput): Layer {
+    return {
+        id: input.id,
+        name: input.name,
+        type: input.type,
+        visible: input.visible ?? true,
+        locked: input.locked ?? false,
+        parentId: input.parentId ?? null,
+        originalId: input.originalId ?? '',
+        childrenIds: input.childrenIds ?? [],
+    };
 }
 
 export type LoopMode = 'none' | 'loop' | 'pingpong';
@@ -89,10 +106,24 @@ export interface Keyframe {
     easing: string;
 }
 
+export const SUBTRACK_EASING_OPTIONS = [
+    { id: 'none', label: 'Linear' },
+    { id: 'power1.in', label: 'Power1 In' },
+    { id: 'power1.out', label: 'Power1 Out' },
+    { id: 'power1.inOut', label: 'Power1 InOut' },
+    { id: 'power2.in', label: 'Power2 In' },
+    { id: 'power2.out', label: 'Power2 Out' },
+    { id: 'power2.inOut', label: 'Power2 InOut' },
+    { id: 'back.out', label: 'Back Out' },
+    { id: 'bounce.out', label: 'Bounce Out' },
+    { id: 'elastic.out', label: 'Elastic Out' },
+];
+
 export interface PropertyTrack {
     property: AnimatableProperty;
     keyframes: Keyframe[];
     enabled: boolean;
+    defaultEasing: string;
 }
 
 export interface AnimatedObject {
@@ -102,49 +133,7 @@ export interface AnimatedObject {
     expanded: boolean;
 }
 
-// ===== PER-PROPERTY PRESET DEFINITIONS =====
-export interface AnimationPreset {
-    id: string;
-    label: string;
-    icon: string;
-}
 
-export const PROPERTY_PRESETS: Record<AnimatableProperty, AnimationPreset[]> = {
-    position: [
-        { id: 'slideInLeft', label: 'Slide In Left', icon: '◀' },
-        { id: 'slideInRight', label: 'Slide In Right', icon: '▶' },
-        { id: 'slideInUp', label: 'Slide In Up', icon: '▲' },
-        { id: 'slideInDown', label: 'Slide In Down', icon: '▼' },
-    ],
-    scale: [
-        { id: 'pulse', label: 'Pulse', icon: '💓' },
-        { id: 'grow', label: 'Grow', icon: '⤢' },
-        { id: 'shrink', label: 'Shrink', icon: '⤡' },
-    ],
-    rotate: [
-        { id: 'spinCW', label: 'Spin CW', icon: '🔄' },
-        { id: 'spinCCW', label: 'Spin CCW', icon: '🔄' },
-        { id: 'swing', label: 'Swing', icon: '↔' },
-    ],
-    opacity: [
-        { id: 'fadeIn', label: 'Fade In', icon: '🌅' },
-        { id: 'fadeOut', label: 'Fade Out', icon: '🌇' },
-        { id: 'blink', label: 'Blink', icon: '👁' },
-        { id: 'pulse', label: 'Pulse', icon: '💓' },
-    ],
-    strokeOffset: [
-        { id: 'drawOn', label: 'Draw On', icon: '✏️' },
-        { id: 'drawOff', label: 'Draw Off', icon: '✂️' },
-    ],
-    morph: [],
-    skew: [],
-    fillColor: [],
-    fillOpacity: [],
-    strokeColor: [],
-    strokeOpacity: [],
-    strokeWidth: [],
-    strokeDashes: [],
-};
 
 interface HistorySnapshot {
     layers: Layer[];
@@ -181,13 +170,14 @@ interface EditorState {
     polygonSides: number;
     starPoints: number;
     starInnerRatio: number;
+    selectedNodeIndex: number | null;
 
     // ===== NHÓM 3: History =====
     undoStack: HistorySnapshot[];
     redoStack: HistorySnapshot[];
 
     // ===== ACTIONS =====
-    addLayer: (layer: Layer) => void;
+    addLayer: (layer: LayerInput) => void;
     removeLayer: (id: string) => void;
     selectLayer: (id: string | null) => void;
     toggleLayerVisibility: (id: string) => void;
@@ -208,16 +198,17 @@ interface EditorState {
     // ===== Animation Actions =====
     addPropertyTrack: (layerId: string, property: AnimatableProperty) => void;
     removePropertyTrack: (layerId: string, property: AnimatableProperty) => void;
+    removeSubTrack: (layerId: string, property: AnimatableProperty) => void;
     toggleTrackEnabled: (layerId: string, property: AnimatableProperty) => void;
     setAnimatedObjectExpanded: (layerId: string, expanded: boolean) => void;
     addKeyframeToTrack: (layerId: string, property: AnimatableProperty, time: number, value: any, easing?: string) => void;
     updateKeyframeInTrack: (layerId: string, property: AnimatableProperty, keyframeId: string, updates: Partial<Keyframe>) => void;
     removeKeyframeFromTrack: (layerId: string, property: AnimatableProperty, keyframeId: string) => void;
     selectKeyframe: (id: string | null) => void;
+    setSelectedNodeIndex: (index: number | null) => void;
+    setTrackDefaultEasing: (layerId: string, property: AnimatableProperty, easing: string) => void;
     ensureAnimatedObject: (layerId: string, objectName: string) => void;
-
-    // Per-property presets
-    applyPropertyPreset: (property: AnimatableProperty, presetId: string, layerId: string, currentTime: number, fabricCanvas: fabric.Canvas | null) => void;
+    updateSubTrackEasing: (layerId: string, property: AnimatableProperty, easing: string) => void;
 
     // localStorage
     saveToStorage: () => void;
@@ -242,6 +233,7 @@ const initialState = {
     timelineZoom: 100,
     animatedObjects: [] as AnimatedObject[],
     selectedKeyframeId: null as string | null,
+    selectedNodeIndex: null as number | null,
     polygonSides: 6,
     starPoints: 5,
     starInnerRatio: 0.5,
@@ -252,17 +244,13 @@ const initialState = {
 function captureSnapshot(layers: Layer[]): HistorySnapshot {
     return { layers: JSON.parse(JSON.stringify(layers)) };
 }
-
-/** Get the fabric object for a given layerId from the canvas */
-function getFabricObj(layerId: string, canvas: fabric.Canvas | null): fabric.Object | undefined {
-    return canvas?.getObjects().find(o => o.data?.id === layerId);
-}
-
 export const useEditorStore = create<EditorState>((set, get) => ({
     ...initialState,
 
     // ===== CANVAS ACTIONS =====
-    addLayer: (layer) => set((s) => ({ layers: [...s.layers, layer] })),
+    addLayer: (layer: LayerInput) => set((s) => ({
+        layers: [...s.layers, createLayer(layer)],
+    })),
 
     removeLayer: (id) => {
         const state = get();
@@ -313,13 +301,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
     addPropertyTrack: (layerId, property) => set((s) => {
         const existing = s.animatedObjects.find(ao => ao.id === layerId);
+        const newTrack = (): PropertyTrack => ({ property, keyframes: [], enabled: true, defaultEasing: 'power2.out' });
         if (!existing) {
             const layer = s.layers.find(l => l.id === layerId);
             return {
                 animatedObjects: [...s.animatedObjects, {
                     id: layerId,
                     objectName: layer?.name || layerId,
-                    tracks: [{ property, keyframes: [], enabled: true }],
+                    tracks: [newTrack()],
                     expanded: true,
                 }],
             };
@@ -329,7 +318,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         return {
             animatedObjects: s.animatedObjects.map(ao =>
                 ao.id === layerId
-                    ? { ...ao, tracks: [...ao.tracks, { property, keyframes: [], enabled: true }] }
+                    ? { ...ao, tracks: [...ao.tracks, newTrack()] }
                     : ao
             ),
             undoStack: [...s.undoStack, snapshot],
@@ -338,6 +327,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }),
 
     removePropertyTrack: (layerId, property) => {
+        const state = get();
+        const snapshot = captureSnapshot(state.layers);
+        set((s) => ({
+            animatedObjects: s.animatedObjects.map(ao =>
+                ao.id === layerId
+                    ? { ...ao, tracks: ao.tracks.filter(t => t.property !== property) }
+                    : ao
+            ),
+            undoStack: [...s.undoStack, snapshot],
+            redoStack: [],
+        }));
+    },
+
+    removeSubTrack: (layerId, property) => {
         const state = get();
         const snapshot = captureSnapshot(state.layers);
         set((s) => ({
@@ -426,6 +429,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     },
 
     selectKeyframe: (id) => set({ selectedKeyframeId: id }),
+    setSelectedNodeIndex: (index) => set({ selectedNodeIndex: index }),
+    setTrackDefaultEasing: (layerId, property, easing) => set((s) => ({
+        animatedObjects: s.animatedObjects.map(ao =>
+            ao.id === layerId
+                ? { ...ao, tracks: ao.tracks.map(t =>
+                      t.property === property
+                          ? { ...t, defaultEasing: easing }
+                          : t
+                  ) }
+                : ao
+        ),
+    })),
 
     // ===== HISTORY =====
     undo: () => {
@@ -457,167 +472,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     },
 
     // ===== PER-PROPERTY PRESETS =====
-    applyPropertyPreset: (property, presetId, layerId, currentTime, fabricCanvas) => {
-        const state = get();
-        if (!fabricCanvas) return;
-        const obj = getFabricObj(layerId, fabricCanvas);
-        if (!obj) return;
-        const snapshot = captureSnapshot(state.layers);
-        const existingAo = state.animatedObjects.find(ao => ao.id === layerId);
-        if (!existingAo) return;
-        const track = existingAo.tracks.find(t => t.property === property);
-        if (!track) return;
+    updateSubTrackEasing: (layerId, property, easing) => set((s) => ({
+        animatedObjects: s.animatedObjects.map(ao =>
+            ao.id === layerId
+                ? {
+                    ...ao,
+                    tracks: ao.tracks.map(t =>
+                        t.property === property
+                            ? { ...t, defaultEasing: easing, keyframes: t.keyframes.map(kf => ({ ...kf, easing })) }
+                            : t
+                    ),
+                }
+                : ao
+        ),
+    })),
 
-        let newKeyframes: { time: number; value: any; easing: string }[] = [];
-        const segment = Math.max(0.5, state.duration * 0.3);
 
-        switch (presetId) {
-            case 'slideInLeft':
-            case 'slideInRight':
-            case 'slideInUp':
-            case 'slideInDown': {
-                if (property !== 'position') return;
-                const dx = presetId === 'slideInLeft' ? -200 : presetId === 'slideInRight' ? 200 : 0;
-                const dy = presetId === 'slideInUp' ? -150 : presetId === 'slideInDown' ? 150 : 0;
-                newKeyframes = [
-                    { time: currentTime, value: { left: Math.round((obj.left || 0) + dx), top: Math.round((obj.top || 0) + dy) }, easing: 'power3.out' },
-                    { time: currentTime + segment, value: { left: Math.round(obj.left || 0), top: Math.round(obj.top || 0) }, easing: 'power3.out' },
-                ];
-                break;
-            }
-            case 'pulse': {
-                if (property === 'scale') {
-                    newKeyframes = [
-                        { time: currentTime, value: { scaleX: obj.scaleX ?? 1, scaleY: obj.scaleY ?? 1 }, easing: 'sine.out' },
-                        { time: currentTime + segment * 0.3, value: { scaleX: (obj.scaleX ?? 1) * 1.15, scaleY: (obj.scaleY ?? 1) * 1.15 }, easing: 'sine.out' },
-                        { time: currentTime + segment * 0.6, value: { scaleX: obj.scaleX ?? 1, scaleY: obj.scaleY ?? 1 }, easing: 'sine.out' },
-                    ];
-                } else if (property === 'opacity') {
-                    newKeyframes = [
-                        { time: currentTime, value: obj.opacity ?? 1, easing: 'sine.out' },
-                        { time: currentTime + segment * 0.2, value: 0.3, easing: 'sine.out' },
-                        { time: currentTime + segment * 0.4, value: obj.opacity ?? 1, easing: 'sine.out' },
-                        { time: currentTime + segment * 0.6, value: 0.3, easing: 'sine.out' },
-                        { time: currentTime + segment, value: obj.opacity ?? 1, easing: 'sine.out' },
-                    ];
-                } else return;
-                break;
-            }
-            case 'grow': {
-                if (property !== 'scale') return;
-                newKeyframes = [
-                    { time: currentTime, value: { scaleX: 0, scaleY: 0 }, easing: 'back.out' },
-                    { time: currentTime + segment, value: { scaleX: obj.scaleX ?? 1, scaleY: obj.scaleY ?? 1 }, easing: 'back.out' },
-                ];
-                break;
-            }
-            case 'shrink': {
-                if (property !== 'scale') return;
-                newKeyframes = [
-                    { time: currentTime, value: { scaleX: obj.scaleX ?? 1, scaleY: obj.scaleY ?? 1 }, easing: 'back.in' },
-                    { time: currentTime + segment, value: { scaleX: 0, scaleY: 0 }, easing: 'back.in' },
-                ];
-                break;
-            }
-            case 'spinCW': {
-                if (property !== 'rotate') return;
-                newKeyframes = [
-                    { time: currentTime, value: obj.angle || 0, easing: 'none' },
-                    { time: currentTime + segment, value: (obj.angle || 0) + 360, easing: 'power2.out' },
-                ];
-                break;
-            }
-            case 'spinCCW': {
-                if (property !== 'rotate') return;
-                newKeyframes = [
-                    { time: currentTime, value: obj.angle || 0, easing: 'none' },
-                    { time: currentTime + segment, value: (obj.angle || 0) - 360, easing: 'power2.out' },
-                ];
-                break;
-            }
-            case 'swing': {
-                if (property !== 'rotate') return;
-                newKeyframes = [
-                    { time: currentTime, value: obj.angle || 0, easing: 'sine.out' },
-                    { time: currentTime + segment * 0.25, value: (obj.angle || 0) + 30, easing: 'sine.out' },
-                    { time: currentTime + segment * 0.5, value: (obj.angle || 0) - 20, easing: 'sine.out' },
-                    { time: currentTime + segment * 0.75, value: (obj.angle || 0) + 10, easing: 'sine.out' },
-                    { time: currentTime + segment, value: obj.angle || 0, easing: 'sine.out' },
-                ];
-                break;
-            }
-            case 'fadeIn': {
-                if (property !== 'opacity') return;
-                newKeyframes = [
-                    { time: currentTime, value: 0, easing: 'power2.out' },
-                    { time: currentTime + segment, value: obj.opacity ?? 1, easing: 'power2.out' },
-                ];
-                break;
-            }
-            case 'fadeOut': {
-                if (property !== 'opacity') return;
-                newKeyframes = [
-                    { time: currentTime, value: obj.opacity ?? 1, easing: 'power2.out' },
-                    { time: currentTime + segment, value: 0, easing: 'power2.out' },
-                ];
-                break;
-            }
-            case 'blink': {
-                if (property !== 'opacity') return;
-                newKeyframes = [
-                    { time: currentTime, value: obj.opacity ?? 1, easing: 'none' },
-                    { time: currentTime + segment * 0.15, value: 0, easing: 'none' },
-                    { time: currentTime + segment * 0.3, value: obj.opacity ?? 1, easing: 'none' },
-                    { time: currentTime + segment * 0.45, value: 0, easing: 'none' },
-                    { time: currentTime + segment * 0.6, value: obj.opacity ?? 1, easing: 'none' },
-                    { time: currentTime + segment * 0.75, value: 0, easing: 'none' },
-                    { time: currentTime + segment, value: obj.opacity ?? 1, easing: 'none' },
-                ];
-                break;
-            }
-            case 'drawOn': {
-                if (property !== 'strokeOffset') return;
-                const dashOffset = (obj as any).strokeDashOffset ?? 0;
-                newKeyframes = [
-                    { time: currentTime, value: 1000, easing: 'none' },
-                    { time: currentTime + segment, value: dashOffset, easing: 'none' },
-                ];
-                break;
-            }
-            case 'drawOff': {
-                if (property !== 'strokeOffset') return;
-                const curOff = (obj as any).strokeDashOffset ?? 0;
-                newKeyframes = [
-                    { time: currentTime, value: curOff, easing: 'none' },
-                    { time: currentTime + segment, value: 1000, easing: 'none' },
-                ];
-                break;
-            }
-            default: return;
-        }
-
-        // Merge new keyframes into the track
-        const updatedTracks = existingAo.tracks.map(t => {
-            if (t.property !== property) return t;
-            return {
-                ...t,
-                keyframes: [...t.keyframes, ...newKeyframes.map(kf => ({
-                    id: crypto.randomUUID(),
-                    ...kf,
-                }))],
-            };
-        });
-
-        const maxTime = updatedTracks.flatMap(t => t.keyframes).reduce((max, k) => Math.max(max, k.time), state.duration);
-        set({
-            animatedObjects: state.animatedObjects.map(ao =>
-                ao.id === layerId ? { ...ao, tracks: updatedTracks } : ao
-            ),
-            duration: Math.max(state.duration, Math.ceil(maxTime + 1)),
-            undoStack: [...state.undoStack, snapshot],
-            redoStack: [],
-        });
-    },
 
     // ===== LOCAL STORAGE =====
     saveToStorage: () => {
@@ -632,6 +502,18 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             const raw = localStorage.getItem(STORAGE_KEY);
             if (!raw) return;
             const data = JSON.parse(raw);
+            if (data.layers) {
+                data.layers = data.layers.map((l: any) => createLayer({
+                    id: l.id,
+                    name: l.name,
+                    type: l.type,
+                    visible: l.visible,
+                    locked: l.locked,
+                    parentId: l.parentId ?? null,
+                    originalId: l.originalId ?? '',
+                    childrenIds: l.childrenIds ?? [],
+                }));
+            }
             set({ ...data, undoStack: [], redoStack: [], isPlaying: false, currentTime: 0 });
         } catch { /* corrupt data */ }
     },

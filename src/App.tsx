@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import Canvas from './editor/canvas/Canvas';
 import Timeline from './editor/timeline/Timeline';
 import RightSidebar from './editor/sidebar/RightSidebar';
+import LayersPanel from './editor/layers/LayersPanel';
 import { useEditorStore } from './store/editorStore';
 import { fabric } from 'fabric';
 import { parseSvgString, readSvgFile } from './services/svgParser';
@@ -9,7 +10,7 @@ import { serializeCanvas, downloadSvg } from './services/svgSerializer';
 import { exportProjectJson, downloadJson } from './services/animationExporter';
 
 export default function App() {
-    const { layers, selectedLayerId, addLayer, selectLayer, loadFromStorage } = useEditorStore();
+    const { loadFromStorage } = useEditorStore();
     const [canvasInstance, setCanvasInstance] = useState<fabric.Canvas | null>(null);
     const fabricCanvasRef = useRef<fabric.Canvas | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -35,7 +36,39 @@ export default function App() {
         try {
             const svgString = await readSvgFile(file);
             const { objects, layers: newLayers } = await parseSvgString(svgString);
-            objects.forEach((obj, i) => { canvas.add(obj); addLayer(newLayers[i]); });
+            if (objects.length === 0) return;
+
+            objects.forEach(obj => canvas.add(obj));
+
+            const canvasWidth = canvas.getWidth();
+            const canvasHeight = canvas.getHeight();
+
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            objects.forEach(obj => {
+                const b = obj.getBoundingRect();
+                if (b.left < minX) minX = b.left;
+                if (b.top < minY) minY = b.top;
+                if (b.left + b.width > maxX) maxX = b.left + b.width;
+                if (b.top + b.height > maxY) maxY = b.top + b.height;
+            });
+
+            const centerX = (minX + maxX) / 2;
+            const centerY = (minY + maxY) / 2;
+            const offsetX = canvasWidth / 2 - centerX;
+            const offsetY = canvasHeight / 2 - centerY;
+
+            objects.forEach(obj => {
+                obj.set({
+                    left: (obj.left || 0) + offsetX,
+                    top: (obj.top || 0) + offsetY,
+                });
+                obj.setCoords();
+                if (obj.type === 'group') {
+                    (obj as fabric.Group).getObjects().forEach(child => child.setCoords());
+                }
+            });
+
+            newLayers.forEach(l => useEditorStore.getState().addLayer(l));
             canvas.renderAll();
         } catch (err) {
             console.error('Import SVG failed:', err);
@@ -103,33 +136,8 @@ export default function App() {
 
             {/* Main Studio — 3-column + timeline below */}
             <div className="flex flex-1 overflow-hidden">
-                {/* Left Sidebar */}
-                <aside className="w-64 shrink-0 border-r border-slate-800 bg-slate-950/30 p-4 flex flex-col gap-4 overflow-hidden">
-                    <h2 className="text-xs font-bold uppercase tracking-widest text-slate-400 shrink-0">Layers List</h2>
-                    <div className="flex flex-1 flex-col gap-1 overflow-y-auto">
-                        {layers.length === 0 ? (
-                            <p className="text-xs text-slate-500 italic p-2">No layers yet. Click add button.</p>
-                        ) : (
-                            layers.map((layer) => (
-                                <div key={layer.id}
-                                    className={`flex items-center justify-between rounded-lg px-3 py-2 text-sm transition-all cursor-pointer shrink-0 ${selectedLayerId === layer.id ? 'bg-indigo-600 text-white font-medium' : 'bg-slate-800/40 text-slate-300 hover:bg-slate-800'} ${!layer.visible ? 'opacity-50' : ''}`}
-                                    onClick={() => selectLayer(layer.id)}>
-                                    <span>📦 {layer.name}</span>
-                                    <button onClick={(e) => {
-                                        e.stopPropagation();
-                                        useEditorStore.getState().toggleLayerVisibility(layer.id);
-                                        const obj = fabricCanvasRef.current?.getObjects().find(o => o.data?.id === layer.id);
-                                        if (obj) { obj.set('visible', !layer.visible); fabricCanvasRef.current?.renderAll(); }
-                                    }}
-                                        className="text-xs hover:text-white transition-colors"
-                                        title={layer.visible ? 'Hide layer' : 'Show layer'}>
-                                        {layer.visible ? '👁️' : '👁️‍🗨️'}
-                                    </button>
-                                </div>
-                            ))
-                        )}
-                    </div>
-                </aside>
+                {/* Left Sidebar — Layers Tree */}
+                <LayersPanel fabricCanvasRef={fabricCanvasRef} />
 
                 {/* Center Column: Canvas + Timeline */}
                 <div className="flex flex-1 flex-col overflow-hidden">
