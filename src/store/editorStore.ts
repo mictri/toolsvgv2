@@ -373,26 +373,43 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     addKeyframeToTrack: (layerId, property, time, value, easing = 'power2.out') => {
         const state = get();
         const snapshot = captureSnapshot(state.layers);
-        const newKf: Keyframe = { id: crypto.randomUUID(), time, value, easing };
-        const ao = state.animatedObjects.find(a => a.id === layerId);
-        const maxTime = ao?.tracks
-            .flatMap(t => t.keyframes)
-            .reduce((max, k) => Math.max(max, k.time), time);
-        const newDuration = maxTime ? Math.max(state.duration, Math.ceil(maxTime + 1)) : state.duration;
-        set((s) => ({
-            animatedObjects: s.animatedObjects.map(ao =>
+        set((s) => {
+            const updatedAo = s.animatedObjects.map(ao =>
                 ao.id === layerId
-                    ? { ...ao, tracks: ao.tracks.map(t =>
-                          t.property === property
-                              ? { ...t, keyframes: [...t.keyframes.filter(k => Math.abs(k.time - time) > 0.01), newKf] }
-                              : t
-                      ) }
+                    ? {
+                        ...ao,
+                        tracks: ao.tracks.map(t => {
+                            if (t.property !== property) return t;
+                            const existingKfIndex = t.keyframes.findIndex(kf => Math.abs(kf.time - time) < 0.05);
+                            let newKeyframes = [...t.keyframes];
+                            if (existingKfIndex >= 0) {
+                                newKeyframes[existingKfIndex] = { ...newKeyframes[existingKfIndex], value, easing };
+                            } else {
+                                newKeyframes.push({
+                                    id: `kf_${Date.now()}_${Math.random().toString(36).substring(2, 9)}_${Math.floor(Math.random() * 1000)}`,
+                                    time,
+                                    value,
+                                    easing,
+                                });
+                            }
+                            newKeyframes.sort((a, b) => a.time - b.time);
+                            return { ...t, keyframes: newKeyframes };
+                        }),
+                    }
                     : ao
-            ),
-            duration: newDuration,
-            undoStack: [...s.undoStack, snapshot],
-            redoStack: [],
-        }));
+            );
+            const maxTime = updatedAo
+                .flatMap(ao => ao.tracks)
+                .flatMap(t => t.keyframes)
+                .reduce((max, k) => Math.max(max, k.time), time);
+            const newDuration = maxTime ? Math.max(s.duration, Math.ceil(maxTime + 1)) : s.duration;
+            return {
+                animatedObjects: updatedAo,
+                duration: newDuration,
+                undoStack: [...s.undoStack, snapshot],
+                redoStack: [],
+            };
+        });
     },
 
     updateKeyframeInTrack: (layerId, property, keyframeId, updates) => set((s) => ({
@@ -409,19 +426,26 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ),
     })),
 
-    removeKeyframeFromTrack: (layerId, property, keyframeId) => {
+    removeKeyframeFromTrack: (objectId: string, property: string, keyframeId: string) => {
         const state = get();
         const snapshot = captureSnapshot(state.layers);
         set((s) => ({
-            animatedObjects: s.animatedObjects.map(ao =>
-                ao.id === layerId
-                    ? { ...ao, tracks: ao.tracks.map(t =>
-                          t.property === property
-                              ? { ...t, keyframes: t.keyframes.filter(k => k.id !== keyframeId) }
-                              : t
-                      ) }
-                    : ao
-            ),
+            animatedObjects: s.animatedObjects.map((ao) => {
+                // 1. Chỉ xử lý đúng object layer chứa keyframe cần xóa
+                if (ao.id !== objectId) return ao;
+                return {
+                    ...ao,
+                    tracks: ao.tracks.map((t) => {
+                        // 2. Chỉ xử lý đúng subtrack (property) chứa keyframe
+                        if (t.property !== property) return t;
+                        // 3. CHỈ lọc bỏ duy nhất 1 keyframe có ID khớp — giữ nguyên mọi keyframe khác + subtrack
+                        return {
+                            ...t,
+                            keyframes: t.keyframes.filter((kf) => String(kf.id) !== String(keyframeId)),
+                        };
+                    }),
+                };
+            }),
             selectedKeyframeId: s.selectedKeyframeId === keyframeId ? null : s.selectedKeyframeId,
             undoStack: [...s.undoStack, snapshot],
             redoStack: [],

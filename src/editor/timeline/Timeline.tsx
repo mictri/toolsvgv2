@@ -1,10 +1,9 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
-import { globalGsapTimeline } from './gsapInstance';
 import {
     useEditorStore, PROPERTY_LABELS,
-    PROPERTY_ICONS, SUBTRACK_EASING_OPTIONS, AnimatableProperty,
+    PROPERTY_ICONS, SUBTRACK_EASING_OPTIONS, AnimatableProperty, LoopMode,
 } from '../../store/editorStore';
-import { compileTimeline } from './timelineCompiler';
+import { compileTimeline, getActiveTimeline } from './timelineCompiler';
 import { fabric } from 'fabric';
 
 interface TimelineProps {
@@ -23,9 +22,9 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
     } = useEditorStore();
 
     const LABEL_WIDTH = 256; // w-64 = 16rem = 256px
-    const requestRef = useRef<number | null>(null);
     const trackRef = useRef<HTMLDivElement | null>(null);
     const isDraggingScrub = useRef(false);
+    const timelineRef = useRef<HTMLDivElement | null>(null);
     const [showAddProperty, setShowAddProperty] = useState(false);
     const addPropertyRef = useRef<HTMLDivElement>(null);
 
@@ -41,50 +40,40 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
-    const updatePlayhead = () => {
-        if (globalGsapTimeline) {
-            const timeNow = globalGsapTimeline.time();
-            setCurrentTime(clampTime(timeNow));
-            if (timeNow >= duration) {
-                if (loopMode === 'loop') {
-                    globalGsapTimeline.time(0);
-                    globalGsapTimeline.play();
-                } else if (loopMode === 'pingpong') {
-                    globalGsapTimeline.reverse();
-                } else {
-                    setIsPlaying(false);
-                }
-            }
-            if (loopMode === 'pingpong' && timeNow <= 0) {
-                globalGsapTimeline.play();
-            }
-        }
-        if (globalGsapTimeline.isActive()) {
-            requestRef.current = requestAnimationFrame(updatePlayhead);
-        }
-    };
-
+    // Auto re-compile khi loopMode, animatedObjects, hoặc fabricCanvas thay đổi
     useEffect(() => {
-        if (isPlaying) {
-            globalGsapTimeline.play();
-            requestRef.current = requestAnimationFrame(updatePlayhead);
-        } else {
-            globalGsapTimeline.pause();
-            if (requestRef.current) cancelAnimationFrame(requestRef.current);
+        const tl = compileTimeline(animatedObjects, fabricCanvas, loopMode as LoopMode);
+        if (isPlaying && tl) {
+            tl.play();
         }
-        return () => { if (requestRef.current) cancelAnimationFrame(requestRef.current); };
-    }, [isPlaying, loopMode]);
+    }, [loopMode, animatedObjects, fabricCanvas]);
 
-    const togglePlayMode = () => {
-        if (currentTime >= duration) handleScrub(0);
-        setIsPlaying(!isPlaying);
+    const handleTogglePlay = () => {
+        const nextPlaying = !isPlaying;
+        setIsPlaying(nextPlaying);
+        let tl = getActiveTimeline();
+        if (!tl) {
+            tl = compileTimeline(animatedObjects, fabricCanvas, loopMode as LoopMode);
+        }
+        if (tl) {
+            if (nextPlaying) {
+                if (loopMode === 'none' && currentTime >= duration) {
+                    setCurrentTime(0);
+                    tl.time(0);
+                }
+                tl.play();
+            } else {
+                tl.pause();
+            }
+        }
     };
 
     const handleScrub = (time: number) => {
         const clamped = clampTime(time);
         const roundedTime = Math.round(clamped * 100) / 100;
         setCurrentTime(roundedTime);
-        if (globalGsapTimeline) globalGsapTimeline.time(roundedTime);
+        const tl = getActiveTimeline();
+        if (tl) tl.time(roundedTime);
         if (fabricCanvas) fabricCanvas.renderAll();
         window.dispatchEvent(new CustomEvent('timeline-scrub', { detail: { time: roundedTime } }));
     };
@@ -154,9 +143,13 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
 
     const handleKeyframeDelete = (e: React.KeyboardEvent) => {
         if ((e.key === 'Delete' || e.key === 'Backspace') && selectedKeyframeId) {
-            for (const ao of useEditorStore.getState().animatedObjects) {
+            e.preventDefault();
+            e.stopPropagation();
+            const store = useEditorStore.getState();
+            for (const ao of store.animatedObjects) {
                 for (const track of ao.tracks) {
-                    if (track.keyframes.find(k => k.id === selectedKeyframeId)) {
+                    const targetKf = track.keyframes.find(k => k.id === selectedKeyframeId);
+                    if (targetKf) {
                         removeKeyframeFromTrack(ao.id, track.property, selectedKeyframeId);
                         selectKeyframe(null);
                         compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
@@ -185,12 +178,12 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
     const animatedLayerIds = animatedObjects.map(ao => ao.id);
 
     return (
-        <div className="border-t border-slate-800 bg-slate-950 px-4 py-3 flex flex-col gap-3 select-none w-full text-slate-200"
+        <div ref={timelineRef} className="border-t border-slate-800 bg-slate-950 px-4 py-3 flex flex-col gap-3 select-none w-full text-slate-200"
             tabIndex={0} onKeyDown={handleKeyframeDelete}>
             {/* Controls Bar */}
             <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                    <button onClick={togglePlayMode}
+                <div className="flex items-center gap-4">
+                    <button onClick={handleTogglePlay}
                         className={`h-7 px-3 rounded font-bold text-xs transition-all ${isPlaying ? 'bg-amber-600 hover:bg-amber-500' : 'bg-emerald-600 hover:bg-emerald-500'}`}>
                         {isPlaying ? '⏸' : '▶'}
                     </button>
@@ -205,29 +198,16 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                             className={`px-2 py-1 rounded-r ${loopMode === 'pingpong' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}
                             title="Ping Pong">🔃</button>
                     </div>
-                    <div className="text-xs text-slate-400 font-mono">
-                        <span className="text-indigo-400 font-bold">{currentTime.toFixed(2)}s</span> / {duration.toFixed(1)}s
-                    </div>
-                </div>
 
-                <div className="flex items-center gap-2">
-                    <div className="flex items-center gap-1 text-[11px] text-slate-500">
-                        <span>Dur:</span>
-                        <input type="number" min={1} max={60} step={0.5} value={duration}
-                            onChange={(e) => setDuration(Math.max(1, Math.min(60, parseFloat(e.target.value) || 5)))}
-                            className="w-12 bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500" />
-                        <span>s</span>
-                    </div>
-                    <div className="flex items-center gap-0.5">
-                        <button onClick={() => setTimelineZoom(timelineZoom - 20)}
-                            className="px-1.5 py-0.5 text-[11px] text-slate-400 hover:text-white hover:bg-slate-800 rounded">−</button>
-                        <span className="text-[10px] font-mono text-slate-500 min-w-[32px] text-center">{timelineZoom}%</span>
-                        <button onClick={() => setTimelineZoom(timelineZoom + 20)}
-                            className="px-1.5 py-0.5 text-[11px] text-slate-400 hover:text-white hover:bg-slate-800 rounded">+</button>
-                    </div>
                     {/* Global +Animate button (dropup) */}
                     <div className="relative" ref={addPropertyRef}>
-                        <button onClick={() => setShowAddProperty(!showAddProperty)}
+                        <button onClick={() => {
+                            setCurrentTime(0);
+                            const tl = getActiveTimeline();
+                            if (tl) tl.seek(0);
+                            if (fabricCanvas) fabricCanvas.renderAll();
+                            setShowAddProperty(!showAddProperty);
+                        }}
                             disabled={!selectedLayerId}
                             className={`px-2 py-1 rounded text-[10px] font-semibold flex items-center gap-1 transition-all ${!selectedLayerId ? 'bg-slate-800 text-slate-600 cursor-not-allowed opacity-50' : 'bg-purple-600 hover:bg-purple-500 text-white'}`}>
                             <span className="text-xs font-bold">+</span>Animate<span className="text-[9px] opacity-70">▲</span>
@@ -264,6 +244,29 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                             </div>
                         )}
                     </div>
+
+
+                    <div className="text-xs text-slate-400 font-mono">
+                        <span className="text-indigo-400 font-bold">{currentTime.toFixed(2)}s</span> / {duration.toFixed(1)}s
+                    </div>
+                </div>
+
+                <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1 text-[11px] text-slate-500">
+                        <span>Dur:</span>
+                        <input type="number" min={1} max={60} step={0.5} value={duration}
+                            onChange={(e) => setDuration(Math.max(1, Math.min(60, parseFloat(e.target.value) || 5)))}
+                            className="w-12 bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500" />
+                        <span>s</span>
+                    </div>
+                    <div className="flex items-center gap-0.5">
+                        <button onClick={() => setTimelineZoom(timelineZoom - 20)}
+                            className="px-1.5 py-0.5 text-[11px] text-slate-400 hover:text-white hover:bg-slate-800 rounded">−</button>
+                        <span className="text-[10px] font-mono text-slate-500 min-w-[32px] text-center">{timelineZoom}%</span>
+                        <button onClick={() => setTimelineZoom(timelineZoom + 20)}
+                            className="px-1.5 py-0.5 text-[11px] text-slate-400 hover:text-white hover:bg-slate-800 rounded">+</button>
+                    </div>
+
                 </div>
             </div>
 
@@ -330,12 +333,14 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                                         return (
                                         <div key={track.property}
                                             className={`flex w-full h-7 items-center transition-colors border-t border-slate-900/30 ${!track.enabled ? 'opacity-40' : ''}`}>
-                                            <div className="w-64 px-2 border-r border-slate-900 flex items-center gap-1 bg-slate-950/10 h-full shrink-0 pl-8">
-                                                <button onClick={(e) => { e.stopPropagation(); useEditorStore.getState().toggleTrackEnabled(ao.id, track.property); }}
+                                            <div className="w-64 px-2 border-r border-slate-900 flex items-center gap-0.5 bg-slate-950/10 h-full shrink-0 pl-8">
+                                                <button
+                                                    onMouseDown={(e) => e.stopPropagation()}
+                                                    onClick={(e) => { e.stopPropagation(); useEditorStore.getState().toggleTrackEnabled(ao.id, track.property); }}
                                                     className="text-[9px] text-slate-600 hover:text-white">
                                                     {track.enabled ? '👁' : '◡'}
                                                 </button>
-                                                <span className="text-[10px] text-slate-500 font-mono shrink-0">
+                                                <span className="text-[10px] font-medium text-slate-300 shrink-0">
                                                     {PROPERTY_LABELS[track.property]}
                                                 </span>
                                                 {/* Per-track Easing Select */}
@@ -351,33 +356,43 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                                                         }
                                                         compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
                                                     }}
-                                                    onClick={(e) => e.stopPropagation()}
-                                                    className="text-[9px] bg-slate-800 border border-slate-700 rounded text-slate-300 min-w-[110px] cursor-pointer focus:outline-none focus:border-indigo-500 ml-1 z-30">
+                                                    onMouseDown={(e) => e.stopPropagation()}
+                                                    className="text-[10px] py-0.5 px-1 bg-slate-800 border border-slate-700 rounded text-slate-300 min-w-[60px] cursor-pointer focus:outline-none focus:border-indigo-500 ml-1 z-30">
                                                     {SUBTRACK_EASING_OPTIONS.map(opt => (
                                                         <option key={opt.id} value={opt.id} className="text-slate-300">{opt.label}</option>
                                                     ))}
                                                 </select>
                                                 {/* Per-track Add Keyframe */}
                                                 <button
+                                                    onMouseDown={(e) => e.stopPropagation()}
                                                     onClick={(e) => {
+                                                        e.preventDefault();
                                                         e.stopPropagation();
+                                                        const store = useEditorStore.getState();
                                                         const value = getCurrentPropertyValue(ao.id, track.property);
                                                         if (value !== undefined) {
-                                                            addKeyframeToTrack(ao.id, track.property, currentTime, value, track.defaultEasing);
-                                                            compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
+                                                            const savedTime = store.currentTime;
+                                                            addKeyframeToTrack(ao.id, track.property, savedTime, value, track.defaultEasing);
+                                                            const updated = useEditorStore.getState();
+                                                            compileTimeline(updated.animatedObjects, fabricCanvas);
+                                                            setCurrentTime(savedTime);
+                                                            const tlRestore = getActiveTimeline();
+                                                            if (tlRestore) tlRestore.time(savedTime);
                                                         }
                                                     }}
-                                                    className="text-[10px] font-semibold text-emerald-400 hover:text-white bg-emerald-950/50 hover:bg-emerald-600 border border-emerald-500/50 px-1.5 py-0.5 rounded ml-1 transition-colors shrink-0"
+                                                    className="text-[10px] font-semibold text-emerald-400 hover:text-white bg-emerald-950/50 hover:bg-emerald-600 border border-emerald-500/50 px-1.5 py-0.5 h-5 flex items-center rounded ml-1 transition-colors shrink-0"
                                                     title="Add keyframe at current playhead">
                                                     + Add
                                                 </button>
                                                 {/* Delete Sub-track */}
-                                                <button onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    e.preventDefault();
-                                                    removeSubTrack(ao.id, track.property);
-                                                    compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
-                                                }}
+                                                <button
+                                                    onMouseDown={(e) => e.stopPropagation()}
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        e.preventDefault();
+                                                        removeSubTrack(ao.id, track.property);
+                                                        compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
+                                                    }}
                                                     className="text-slate-500 hover:text-rose-400 hover:bg-slate-800/80 rounded p-1 transition-colors ml-0.5"
                                                     title="Remove track">
                                                     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
@@ -407,7 +422,20 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                                                     return (
                                                         <div key={kf.id}
                                                             onMouseDown={(e) => handleKeyframeDrag(e, kf.id)}
-                                                            onClick={(e) => { e.stopPropagation(); handleScrub(kf.time); selectKeyframe(kf.id); }}
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                timelineRef.current?.focus();
+                                                                handleScrub(kf.time);
+                                                                selectKeyframe(kf.id);
+                                                            }}
+                                                            onContextMenu={(e) => {
+                                                                e.preventDefault();
+                                                                e.stopPropagation();
+                                                                selectKeyframe(kf.id);
+                                                                removeKeyframeFromTrack(ao.id, track.property, kf.id);
+                                                                selectKeyframe(null);
+                                                                compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
+                                                            }}
                                                             className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2.5 h-2.5 rotate-45 border transition-all cursor-grab active:cursor-grabbing z-20 shadow-md ${isSelectedKf ? 'bg-rose-400 border-white scale-125 shadow-rose-500/60 ring-2 ring-rose-500/30' : 'bg-indigo-400 border-slate-950 hover:bg-indigo-300'}`}
                                                             style={{ left: `${kfPct}%` }}
                                                             title={`${kf.time.toFixed(2)}s [${track.property}]`} />
