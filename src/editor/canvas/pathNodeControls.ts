@@ -1,6 +1,7 @@
 import { fabric } from 'fabric';
 import { pathCanvasToLocal, updatePathAnchor, updatePathHandle } from './pathNodeEditor';
 import type { PathAnchorNode } from './pathNodeEditor';
+import { useEditorStore } from '../../store/editorStore';
 
 interface SavedState {
     controls: Record<string, fabric.Control>;
@@ -45,6 +46,7 @@ function anchorToScreen(obj: fabric.Object, localPt: { x: number; y: number }): 
 export function setupPathNodeControls(
     pathObj: fabric.Path,
     anchors: PathAnchorNode[],
+    onNodeDrag?: (nodeIndex: number) => void,
 ): void {
     if (savedStates.has(pathObj)) return;
 
@@ -79,14 +81,18 @@ export function setupPathNodeControls(
                 }
                 pathObj.setCoords();
                 (pathObj.canvas as fabric.Canvas)?.requestRenderAll();
+                onNodeDrag?.(ai);
                 return true;
             },
             render(ctx: CanvasRenderingContext2D, left: number, top: number, _styleOverride: any, _fabricObj: fabric.Object) {
-                ctx.fillStyle = '#fff';
-                ctx.strokeStyle = '#818cf8';
-                ctx.lineWidth = SCREEN_ANCHOR_STROKE;
+                const selectedIndex = useEditorStore.getState().selectedNodeIndex;
+                const isSelected = selectedIndex === ai;
+                ctx.fillStyle = isSelected ? '#f59e0b' : '#fff';
+                ctx.strokeStyle = isSelected ? '#f59e0b' : '#818cf8';
+                ctx.lineWidth = isSelected ? 2.5 : SCREEN_ANCHOR_STROKE;
+                const r = isSelected ? SCREEN_ANCHOR_RADIUS + 2 : SCREEN_ANCHOR_RADIUS;
                 ctx.beginPath();
-                ctx.arc(left, top, SCREEN_ANCHOR_RADIUS, 0, Math.PI * 2);
+                ctx.arc(left, top, r, 0, Math.PI * 2);
                 ctx.fill();
                 ctx.stroke();
             },
@@ -113,6 +119,7 @@ export function setupPathNodeControls(
                     }
                     pathObj.setCoords();
                     (pathObj.canvas as fabric.Canvas)?.requestRenderAll();
+                    onNodeDrag?.(ai);
                     return true;
                 },
                 render(ctx: CanvasRenderingContext2D, left: number, top: number, _styleOverride: any, _fabricObj: fabric.Object) {
@@ -148,6 +155,7 @@ export function setupPathNodeControls(
                     }
                     pathObj.setCoords();
                     (pathObj.canvas as fabric.Canvas)?.requestRenderAll();
+                    onNodeDrag?.(ai);
                     return true;
                 },
                 render(ctx: CanvasRenderingContext2D, left: number, top: number, _styleOverride: any, _fabricObj: fabric.Object) {

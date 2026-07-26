@@ -2,7 +2,8 @@ import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useEditorStore, AnimatableProperty, ROOT_LAYER_ID } from '../../store/editorStore';
 import { compileTimeline } from '../timeline/timelineCompiler';
 import { fabric } from 'fabric';
-import { parsePathAnchors, updatePathAnchor, pathCanvasToLocal, setNodeType as applyPathNodeType } from '../canvas/pathNodeEditor';
+import { parsePathAnchors, pathCanvasToLocal, setNodeType as applyNodeType, getNodePoint, updateNodePoint, getNodeCount, removeNode } from '../canvas/pathNodeEditor';
+import { teardownPathNodeControls, hasPathNodeControls, setupPathNodeControls } from '../canvas/pathNodeControls';
 import { ChevronRight, ChevronDown, Link as LinkIcon, Unlink, ArrowUpDown, Ban, Copy } from 'lucide-react';
 import { HexColorPicker } from 'react-colorful';
 
@@ -21,10 +22,11 @@ interface RightSidebarProps {
     fabricCanvas: fabric.Canvas | React.MutableRefObject<fabric.Canvas | null> | null;
 }
 
-const NODE_TYPE_ICONS = {
+const NODE_TYPE_ICONS: Record<string, React.ReactNode> = {
     corner: <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M3 3 L3 11 L11 11" /></svg>,
     smooth: <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M3 3 C3 8, 11 8, 11 11" /></svg>,
     symmetric: <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M3 3 C5 8, 9 8, 11 3" /><path d="M3 11 C5 6, 9 6, 11 11" /></svg>,
+    disconnected: <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M3 3 L11 11" /><path d="M11 3 L3 11" /></svg>,
 };
 
 const calculatePathLength = (obj: any): number => {
@@ -172,7 +174,7 @@ function CanvasPropertiesGroup({ fabricCanvas }: RightSidebarProps) {
 export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
     const {
         selectedLayerId, currentTime, animatedObjects, addKeyframeToTrack, addPropertyTrack,
-        activeTool, selectedNodeIndex, setSelectedNodeIndex,
+        activeTool, selectedNodeIndex, setSelectedNodeIndex, nodeDragPosition,
     } = useEditorStore();
 
     const [left, setLeft] = useState<string>('0');
@@ -197,7 +199,6 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
 
     const [nodeX, setNodeX] = useState<string>('0');
     const [nodeY, setNodeY] = useState<string>('0');
-    const [cornerRadius, setCornerRadius] = useState<string>('0');
     const [nodeType, setNodeType] = useState('corner');
 
     const [popover, setPopover] = useState<'fill' | 'stroke' | 'copy' | null>(null);
@@ -292,30 +293,30 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
         updateNodeWorldPosRef.current = updateNodeWorldPosition;
     }, [updateNodeWorldPosition]);
 
-    const pathAnchors = useMemo(() => {
-        if (!isNodeTool || !isPathObj || !selectedObj) return [];
-        return parsePathAnchors(selectedObj as fabric.Path);
-    }, [isNodeTool, isPathObj, selectedObj]);
-
     const polygonPoints = useMemo(() => {
         if (!isNodeTool || !isPolygonObj || !selectedObj) return [] as fabric.Point[];
         return (selectedObj as fabric.Polygon).points || [];
     }, [isNodeTool, isPolygonObj, selectedObj]);
 
-    const selectedAnchor = useMemo(() => {
-        if (!isPathObj || selectedNodeIndex === null || selectedNodeIndex >= pathAnchors.length) return null;
-        return pathAnchors[selectedNodeIndex];
-    }, [isPathObj, selectedNodeIndex, pathAnchors]);
-
+    // Sync world position X/Y and node type when selection changes — always reads fresh anchor data
     useEffect(() => {
         if (!selectedObj) return;
-        if (selectedAnchor && isPathObj) {
-            const m = (selectedObj as fabric.Path).calcTransformMatrix();
-            const worldPt = fabric.util.transformPoint(new fabric.Point(selectedAnchor.x, selectedAnchor.y), m);
-            setNodeX(String(Math.round(worldPt.x)));
-            setNodeY(String(Math.round(worldPt.y)));
-            setNodeType(selectedAnchor.nodeType);
-        } else if (isPolygonObj && selectedNodeIndex !== null && selectedNodeIndex < polygonPoints.length) {
+        if (selectedNodeIndex === null) {
+            setNodeX('0'); setNodeY('0'); return;
+        }
+        if (isPathObj) {
+            const pt = getNodePoint(selectedObj as fabric.Path, selectedNodeIndex);
+            if (pt) {
+                const matrix = (selectedObj as fabric.Path).calcTransformMatrix();
+                const worldPt = fabric.util.transformPoint(new fabric.Point(pt.x, pt.y), matrix);
+                setNodeX(String(Math.round(worldPt.x)));
+                setNodeY(String(Math.round(worldPt.y)));
+                const anchors = parsePathAnchors(selectedObj as fabric.Path);
+                if (selectedNodeIndex < anchors.length) {
+                    setNodeType(anchors[selectedNodeIndex].nodeType);
+                }
+            }
+        } else if (isPolygonObj && selectedNodeIndex < polygonPoints.length) {
             const pt = polygonPoints[selectedNodeIndex];
             const matrix = (selectedObj as fabric.Polygon).calcTransformMatrix();
             const off = (selectedObj as fabric.Polygon).pathOffset || { x: 0, y: 0 };
@@ -323,10 +324,15 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
             setNodeX(String(Math.round(worldPt.x)));
             setNodeY(String(Math.round(worldPt.y)));
         }
-        if (selectedNodeIndex === null) {
-            setNodeX('0'); setNodeY('0');
+    }, [selectedNodeIndex, isPathObj, isPolygonObj, polygonPoints, selectedObj]);
+
+    // Real-time drag sync from canvas → sidebar position X/Y
+    useEffect(() => {
+        if (nodeDragPosition && selectedNodeIndex !== null) {
+            setNodeX(String(nodeDragPosition.x));
+            setNodeY(String(nodeDragPosition.y));
         }
-    }, [selectedAnchor, selectedNodeIndex, isPathObj, isPolygonObj, polygonPoints, selectedObj]);
+    }, [nodeDragPosition, selectedNodeIndex]);
 
     useEffect(() => {
         if (!activeCanvas || !selectedLayerId) return;
@@ -346,7 +352,8 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
             setFill((targetObj.fill as string) || '');
             setStroke(targetObj.stroke || '');
             setStrokeWidth(String(targetObj.strokeWidth || 1));
-            setStrokeDashArray((targetObj.strokeDashArray && targetObj.strokeDashArray.length > 0) ? targetObj.strokeDashArray.join(', ') : '0');
+            const dashes = targetObj.strokeDashArray;
+            setStrokeDashArray(Array.isArray(dashes) && dashes.length > 0 ? dashes.join(', ') : '0');
             setStrokeDashOffset(String(targetObj.strokeDashOffset || 0));
             setPathLength(Number(calculatePathLength(targetObj)).toFixed(1));
             updateNodeWorldPosRef.current();
@@ -469,16 +476,40 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
                                 <div>
                                     <label className="text-[10px] text-slate-500 block mb-0.5">Node Type</label>
                                     <div className="flex gap-1">
-                                        {(['corner', 'smooth', 'symmetric'] as const).map(type => (
+                                        {(['corner', 'smooth', 'symmetric', 'disconnected'] as const).map(type => (
                                             <button key={type}
-                                                onClick={() => {
+                                                onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                                                onClick={(e) => {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                    if (selectedNodeIndex === null) return;
                                                     setNodeType(type);
-                                                    if (selectedAnchor) {
-                                                        applyPathNodeType(selectedObj as fabric.Path, selectedAnchor, type);
-                                                        const pathObj = selectedObj as fabric.Path;
-                                                        pathObj.set({ path: (pathObj.path || []).slice() as any });
-                                                        pathObj.setCoords();
-                                                        getActiveCanvas()?.requestRenderAll();
+                                                    applyNodeType(selectedObj as fabric.Path, selectedNodeIndex, type);
+                                                    // Directly refresh path controls to show bezier handles
+                                                    const pathObj = selectedObj as fabric.Path;
+                                                    if (hasPathNodeControls(pathObj)) {
+                                                        teardownPathNodeControls(pathObj);
+                                                        const anchors = parsePathAnchors(pathObj);
+                                                        setupPathNodeControls(pathObj, anchors, (ni) => {
+                                                            const state = useEditorStore.getState();
+                                                            if (state.selectedNodeIndex === ni) {
+                                                                const pt = getNodePoint(pathObj, ni);
+                                                                if (pt) {
+                                                                    const m = pathObj.calcTransformMatrix();
+                                                                    const wp = fabric.util.transformPoint(new fabric.Point(pt.x, pt.y), m);
+                                                                    state.setNodeDragPosition({ x: Math.round(wp.x), y: Math.round(wp.y) });
+                                                                }
+                                                            }
+                                                        });
+                                                    }
+                                                    getActiveCanvas()?.requestRenderAll();
+                                                    // Re-sync position after handle transformation
+                                                    const pt = getNodePoint(selectedObj as fabric.Path, selectedNodeIndex);
+                                                    if (pt) {
+                                                        const matrix = (selectedObj as fabric.Path).calcTransformMatrix();
+                                                        const worldPt = fabric.util.transformPoint(new fabric.Point(pt.x, pt.y), matrix);
+                                                        setNodeX(String(Math.round(worldPt.x)));
+                                                        setNodeY(String(Math.round(worldPt.y)));
                                                     }
                                                 }}
                                                 className={`flex-1 flex flex-col items-center gap-0.5 py-1.5 px-1 rounded text-[9px] font-bold transition-all ${nodeType === type ? 'bg-amber-500/20 text-amber-400 border border-amber-500/50' : 'bg-slate-800/50 text-slate-500 border border-transparent hover:bg-slate-700 hover:text-slate-300'}`}
@@ -500,10 +531,10 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
                                         setNodeX(e.target.value);
                                         const worldY = parseFloat(nodeY);
                                         if (isNaN(worldY)) return;
-                                        if (isPathObj && selectedAnchor) {
+                                        if (isPathObj && selectedNodeIndex !== null) {
                                             const pathObj = selectedObj as fabric.Path;
                                             const localPt = pathCanvasToLocal(pathObj, { x: v, y: worldY });
-                                            updatePathAnchor(pathObj, selectedAnchor, localPt.x, localPt.y);
+                                            updateNodePoint(pathObj, selectedNodeIndex, localPt.x, localPt.y);
                                             pathObj.set({ path: (pathObj.path || []).slice() as any });
                                             pathObj.setCoords();
                                             getActiveCanvas()?.requestRenderAll();
@@ -533,10 +564,10 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
                                         setNodeY(e.target.value);
                                         const worldX = parseFloat(nodeX);
                                         if (isNaN(worldX)) return;
-                                        if (isPathObj && selectedAnchor) {
+                                        if (isPathObj && selectedNodeIndex !== null) {
                                             const pathObj = selectedObj as fabric.Path;
                                             const localPt = pathCanvasToLocal(pathObj, { x: worldX, y: v });
-                                            updatePathAnchor(pathObj, selectedAnchor, localPt.x, localPt.y);
+                                            updateNodePoint(pathObj, selectedNodeIndex, localPt.x, localPt.y);
                                             pathObj.set({ path: (pathObj.path || []).slice() as any });
                                             pathObj.setCoords();
                                             getActiveCanvas()?.requestRenderAll();
@@ -563,19 +594,35 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
                                 </div>
                             </div>
                             
-                            <div className='flex items-center gap-2'><label className="text-[10px] text-slate-500 block mb-0.5">Corner Radius</label>
-                                <input type="number" min={0} value={cornerRadius} onChange={e => {
-                                    const v = parseFloat(e.target.value);
-                                    if (isNaN(v) || !selectedObj) return;
-                                    setCornerRadius(e.target.value);
-                                    (selectedObj as any).set({ rx: v, ry: v });
-                                    selectedObj.setCoords();
-                                    getActiveCanvas()?.requestRenderAll();
-                                }} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-[11px] font-mono text-slate-100 focus:outline-none focus:border-amber-500" /></div>
-
                             <div className="flex items-center gap-1 flex-wrap mt-2">
-                                {(isPathObj ? pathAnchors : polygonPoints).map((_, i) => (
-                                    <button key={i} onClick={() => setSelectedNodeIndex(selectedNodeIndex === i ? null : i)} className={`w-5 h-5 rounded text-[9px] font-bold transition-all shadow-sm ${selectedNodeIndex === i ? 'bg-amber-500 text-white scale-110' : 'bg-slate-800 text-slate-500 hover:bg-slate-700'}`}>{i + 1}</button>
+                                {(isPathObj && selectedObj
+                                    ? Array.from({ length: getNodeCount(selectedObj as fabric.Path) }, (_, i) => i)
+                                    : polygonPoints.map((_, i) => i)
+                                ).map(i => (
+                                    <button key={i} title={isPathObj ? 'Click to select, double-click to delete' : ''}
+                                        onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setSelectedNodeIndex(selectedNodeIndex === i ? null : i); getActiveCanvas()?.requestRenderAll(); }}
+                                        onDoubleClick={(e) => {
+                                            e.preventDefault(); e.stopPropagation();
+                                            if (!isPathObj || !selectedObj) return;
+                                            const canvas = getActiveCanvas();
+                                            if (!canvas) return;
+                                            removeNode(selectedObj as fabric.Path, i);
+                                            // Recalculate node count and adjust selection
+                                            const count = getNodeCount(selectedObj as fabric.Path);
+                                            setSelectedNodeIndex(count > 0 ? Math.min(i, count - 1) : null);
+                                            // Force-refresh path controls
+                                            if (hasPathNodeControls(selectedObj as fabric.Path)) {
+                                                teardownPathNodeControls(selectedObj as fabric.Path);
+                                                const anchors = parsePathAnchors(selectedObj as fabric.Path);
+                                                setupPathNodeControls(selectedObj as fabric.Path, anchors);
+                                            }
+                                            canvas.requestRenderAll();
+                                        }}
+                                        className={`w-5 h-5 rounded text-[9px] font-bold transition-all shadow-sm group relative ${selectedNodeIndex === i ? 'bg-amber-500 text-white scale-110' : 'bg-slate-800 text-slate-500 hover:bg-slate-700'}`}>
+                                        {i + 1}
+                                        {isPathObj && <span className="absolute -top-1 -right-1 text-[7px] text-red-400 opacity-0 group-hover:opacity-100 transition-opacity">×</span>}
+                                    </button>
                                 ))}
                             </div>
                         </div>

@@ -7,7 +7,7 @@ export interface PathHandleRef {
     offset: number;
 }
 
-export type NodeType = 'corner' | 'smooth' | 'symmetric';
+export type NodeType = 'corner' | 'smooth' | 'symmetric' | 'disconnected';
 
 export interface PathAnchorNode {
     cmdIdx: number;
@@ -58,6 +58,15 @@ export function parsePathAnchors(pathObj: fabric.Path): PathAnchorNode[] {
                 const dIn = Math.sqrt(dxIn * dxIn + dyIn * dyIn);
                 const dOut = Math.sqrt(dxOut * dxOut + dyOut * dyOut);
                 a.nodeType = Math.abs(dIn - dOut) < 0.5 ? 'symmetric' : 'smooth';
+            }
+        }
+    }
+    // Restore user-set node types (e.g. 'disconnected') from persistent storage
+    const stored = (pathObj as any).__nodeTypes as Record<number, string> | undefined;
+    if (stored) {
+        for (let i = 0; i < anchors.length; i++) {
+            if (stored[i] === 'disconnected') {
+                anchors[i].nodeType = 'disconnected';
             }
         }
     }
@@ -148,48 +157,189 @@ export function rebuildPath(pathObj: fabric.Path): void {
     pathObj.setCoords();
 }
 
-/** Change the node type and adjust handles accordingly */
+/**
+ * Full node-type transformation that rebuilds the entire path.
+ *
+ * - `corner`:       removes both handles, makes incoming/outgoing segments straight (L).
+ * - `smooth`:       creates/aligns handles with C1 continuity (collinear, different lengths OK).
+ * - `symmetric`:    creates/aligns handles with C1 + equal length.
+ * - `disconnected`: creates handles but leaves them independent (no mirroring).
+ */
 export function setNodeType(
     pathObj: fabric.Path,
-    anchor: PathAnchorNode,
+    nodeIndex: number,
     nodeType: NodeType,
 ): void {
     const cmds = pathObj.path as unknown as any[][];
-    anchor.nodeType = nodeType;
+    const isClosed = cmds.length > 0 && (cmds[cmds.length - 1][0] === 'Z' || cmds[cmds.length - 1][0] === 'z');
+    const anchors = parsePathAnchorsFromCmds(cmds);
+    if (nodeIndex < 0 || nodeIndex >= anchors.length) return;
 
-    if (nodeType === 'corner') return;
-
-    if (nodeType === 'symmetric' && anchor.handleIn && anchor.handleOut) {
-        const dx = anchor.x - anchor.handleIn.x;
-        const dy = anchor.y - anchor.handleIn.y;
-        const nx = anchor.x + dx;
-        const ny = anchor.y + dy;
-        const hoCmd = cmds[anchor.handleOut.ref.cmdIdx];
-        hoCmd[anchor.handleOut.ref.offset] = nx;
-        hoCmd[anchor.handleOut.ref.offset + 1] = ny;
-        anchor.handleOut.x = nx;
-        anchor.handleOut.y = ny;
-        return;
+    // --- corner: strip all handles on and adjacent to this node ---
+    if (nodeType === 'corner') {
+        const a = anchors[nodeIndex];
+        a.handleIn = null;
+        a.handleOut = null;
+        if (nodeIndex > 0) anchors[nodeIndex - 1].handleOut = null;
+        else if (isClosed && anchors.length > 1) anchors[anchors.length - 1].handleOut = null;
+        if (nodeIndex < anchors.length - 1) anchors[nodeIndex + 1].handleIn = null;
+        else if (isClosed && anchors.length > 1) anchors[0].handleIn = null;
     }
 
-    if (nodeType === 'smooth' && anchor.handleIn && anchor.handleOut) {
-        const dxIn = anchor.x - anchor.handleIn.x;
-        const dyIn = anchor.y - anchor.handleIn.y;
-        const lenIn = Math.sqrt(dxIn * dxIn + dyIn * dyIn);
-        if (lenIn > 0) {
-            const dxOut = anchor.handleOut.x - anchor.x;
-            const dyOut = anchor.handleOut.y - anchor.y;
-            const lenOut = Math.sqrt(dxOut * dxOut + dyOut * dyOut);
-            const nx = anchor.x + (dxIn / lenIn) * lenOut;
-            const ny = anchor.y + (dyIn / lenIn) * lenOut;
-            const hoCmd = cmds[anchor.handleOut.ref.cmdIdx];
-            hoCmd[anchor.handleOut.ref.offset] = nx;
-            hoCmd[anchor.handleOut.ref.offset + 1] = ny;
-            anchor.handleOut.x = nx;
-            anchor.handleOut.y = ny;
+    // --- helpers for smooth / symmetric / disconnected ---
+    const ensureIn = (idx: number) => {
+        const a = anchors[idx];
+        if (a.handleIn) return;
+        let pIdx = idx - 1;
+        if (pIdx < 0) { if (isClosed && anchors.length > 1) pIdx = anchors.length - 1; else return; }
+        const prev = anchors[pIdx];
+        const dx = a.x - prev.x, dy = a.y - prev.y;
+        const len = Math.sqrt(dx * dx + dy * dy) || 30;
+        const ux = dx / len, uy = dy / len;
+        const hLen = Math.min(len / 3, 60);
+        a.handleIn = { ref: { cmdIdx: -1, offset: -1 }, x: a.x - ux * hLen, y: a.y - uy * hLen };
+        if (!prev.handleOut) { prev.handleOut = { ref: { cmdIdx: -1, offset: -1 }, x: prev.x + ux * hLen, y: prev.y + uy * hLen }; }
+    };
+    const ensureOut = (idx: number) => {
+        const a = anchors[idx];
+        if (a.handleOut) return;
+        let nIdx = idx + 1;
+        if (nIdx >= anchors.length) { if (isClosed && anchors.length > 1) nIdx = 0; else return; }
+        const next = anchors[nIdx];
+        const dx = next.x - a.x, dy = next.y - a.y;
+        const len = Math.sqrt(dx * dx + dy * dy) || 30;
+        const ux = dx / len, uy = dy / len;
+        const hLen = Math.min(len / 3, 60);
+        a.handleOut = { ref: { cmdIdx: -1, offset: -1 }, x: a.x + ux * hLen, y: a.y + uy * hLen };
+        if (!next.handleIn) { next.handleIn = { ref: { cmdIdx: -1, offset: -1 }, x: next.x - ux * hLen, y: next.y - uy * hLen }; }
+    };
+
+    if (nodeType === 'smooth' || nodeType === 'symmetric') {
+        ensureIn(nodeIndex);
+        ensureOut(nodeIndex);
+        const a = anchors[nodeIndex];
+        if (a.handleIn && a.handleOut) {
+            if (nodeType === 'symmetric') {
+                a.handleOut.x = a.x + (a.x - a.handleIn.x);
+                a.handleOut.y = a.y + (a.y - a.handleIn.y);
+            } else {
+                const dxIn = a.x - a.handleIn.x, dyIn = a.y - a.handleIn.y;
+                const lenIn = Math.sqrt(dxIn * dxIn + dyIn * dyIn);
+                if (lenIn > 0) {
+                    const dxOut = a.handleOut.x - a.x, dyOut = a.handleOut.y - a.y;
+                    const lenOut = Math.sqrt(dxOut * dxOut + dyOut * dyOut);
+                    a.handleOut.x = a.x + (dxIn / lenIn) * lenOut;
+                    a.handleOut.y = a.y + (dyIn / lenIn) * lenOut;
+                }
+            }
         }
-        return;
     }
+
+    if (nodeType === 'disconnected') {
+        ensureIn(nodeIndex);
+        ensureOut(nodeIndex);
+        // keep handles independent — no mirroring
+    }
+
+    // --- rebuild path commands from modified anchors ---
+    const newCmds = anchorsToCmds(anchors, isClosed);
+    pathObj.path = newCmds as any;
+
+    // --- persist user-set node type ---
+    const stored = ((pathObj as any).__nodeTypes = (pathObj as any).__nodeTypes || {});
+    stored[nodeIndex] = nodeType;
+
+    // Re-apply to fabric
+    pathObj.set({ path: pathObj.path as any });
+    pathObj.setCoords();
+}
+
+/** Get the local-space coordinates of a node by index */
+export function getNodePoint(
+    pathObj: fabric.Path,
+    nodeIndex: number,
+): Point | null {
+    const anchors = parsePathAnchors(pathObj);
+    if (nodeIndex < 0 || nodeIndex >= anchors.length) return null;
+    return { x: anchors[nodeIndex].x, y: anchors[nodeIndex].y };
+}
+
+/** Update a node's position in local space by index */
+export function updateNodePoint(
+    pathObj: fabric.Path,
+    nodeIndex: number,
+    localX: number,
+    localY: number,
+): void {
+    const anchors = parsePathAnchors(pathObj);
+    if (nodeIndex < 0 || nodeIndex >= anchors.length) return;
+    updatePathAnchor(pathObj, anchors[nodeIndex], localX, localY);
+}
+
+/** Get the number of nodes / anchors in a path */
+export function getNodeCount(pathObj: fabric.Path): number {
+    return parsePathAnchors(pathObj).length;
+}
+
+/** Reconnect bezier handles after removing a node at anchorIdx */
+export function removeAnchorFromCmds(cmds: any[][], anchorIdx: number, isClosed: boolean): any[][] {
+    const result = cloneCmds(cmds);
+    const anchors = parsePathAnchorsFromCmds(result);
+    if (anchors.length < 3) return result;
+
+    let prevIdx = anchorIdx - 1;
+    let nextIdx = anchorIdx + 1;
+    if (prevIdx < 0) { prevIdx = isClosed && anchors.length > 1 ? anchors.length - 1 : -1; }
+    if (nextIdx >= anchors.length) { nextIdx = isClosed && anchors.length > 1 ? 0 : -1; }
+    if (prevIdx < 0 || nextIdx < 0) return result;
+
+    const anchor = anchors[anchorIdx];
+    const prevAnchor = anchors[prevIdx];
+    const nextAnchor = anchors[nextIdx];
+
+    // Remove the anchor's own command (the segment ending at this anchor)
+    result.splice(anchor.cmdIdx, 1);
+
+    // After splice, the next segment (was at nextAnchor.cmdIdx) shifted down by 1
+    const segIdx = nextAnchor.cmdIdx - 1;
+    if (segIdx >= 0 && segIdx < result.length) {
+        const seg = result[segIdx];
+        const hasPrevHandle = !!prevAnchor.handleOut;
+        const hasNextHandle = !!nextAnchor.handleIn;
+
+        if (hasPrevHandle || hasNextHandle) {
+            const hOut = hasPrevHandle
+                ? { x: prevAnchor.handleOut!.x, y: prevAnchor.handleOut!.y }
+                : { x: prevAnchor.x + (nextAnchor.x - prevAnchor.x) * 0.3, y: prevAnchor.y + (nextAnchor.y - prevAnchor.y) * 0.3 };
+            const hIn = hasNextHandle
+                ? { x: nextAnchor.handleIn!.x, y: nextAnchor.handleIn!.y }
+                : { x: nextAnchor.x - (nextAnchor.x - prevAnchor.x) * 0.3, y: nextAnchor.y - (nextAnchor.y - prevAnchor.y) * 0.3 };
+            if (seg[0] === 'L' || seg[0] === 'C') {
+                result[segIdx] = ['C', hOut.x, hOut.y, hIn.x, hIn.y, nextAnchor.x, nextAnchor.y];
+            }
+        }
+        // If neither side has handles, the next segment (L or C) remains as-is;
+        // its implicit start point shifts to prevAnchor, creating a straight line.
+    }
+
+    // If first anchor was removed, ensure M exists
+    if (anchorIdx === 0 && result.length > 0 && result[0][0] !== 'M') {
+        result.unshift(['M', nextAnchor.x, nextAnchor.y]);
+    }
+
+    return result;
+}
+
+/** Remove a node from a fabric.Path and update it in place */
+export function removeNode(pathObj: fabric.Path, nodeIndex: number): void {
+    const cmds = (pathObj.path as unknown as any[][]) || [];
+    if (cmds.length < 3) return;
+    const isClosed = cmds.length > 0 && (cmds[cmds.length - 1]?.[0] === 'Z' || cmds[cmds.length - 1]?.[0] === 'z');
+    const newCmds = removeAnchorFromCmds(cmds, nodeIndex, isClosed);
+    if (newCmds.length < 2) return;
+    (pathObj as any).__nodeTypes = undefined;
+    pathObj.set({ path: newCmds as any });
+    pathObj.setCoords();
 }
 
 /** Deep-clone a Fabric path commands array */

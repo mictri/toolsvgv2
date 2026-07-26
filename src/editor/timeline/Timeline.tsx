@@ -216,7 +216,7 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                             setCurrentTime(0);
                             const tl = getActiveTimeline();
                             if (tl) tl.seek(0);
-                            if (fabricCanvas) fabricCanvas.renderAll();
+        if (fabricCanvas) { try { fabricCanvas.renderAll(); } catch { /* canvas may be destroyed during remount */ } }
                             setShowAddProperty(!showAddProperty);
                         }}
                             disabled={!selectedLayerId}

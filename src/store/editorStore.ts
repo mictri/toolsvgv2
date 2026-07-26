@@ -200,6 +200,7 @@ interface EditorState {
     starPoints: number;
     starInnerRatio: number;
     selectedNodeIndex: number | null;
+    nodeDragPosition: { x: number; y: number } | null;
 
     // ===== NHÓM 3: History =====
     undoStack: HistorySnapshot[];
@@ -241,6 +242,7 @@ interface EditorState {
     removeKeyframeFromTrack: (layerId: string, property: AnimatableProperty, keyframeId: string) => void;
     selectKeyframe: (id: string | null) => void;
     setSelectedNodeIndex: (index: number | null) => void;
+    setNodeDragPosition: (pos: { x: number; y: number } | null) => void;
     setTrackDefaultEasing: (layerId: string, property: AnimatableProperty, easing: string) => void;
     ensureAnimatedObject: (layerId: string, objectName: string) => void;
     removeAnimatedObject: (layerId: string) => void;
@@ -273,6 +275,7 @@ const initialState = {
     animatedObjects: [] as AnimatedObject[],
     selectedKeyframeId: null as string | null,
     selectedNodeIndex: null as number | null,
+    nodeDragPosition: null as { x: number; y: number } | null,
     polygonSides: 6,
     starPoints: 5,
     starInnerRatio: 0.5,
@@ -518,6 +521,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
     selectKeyframe: (id) => set({ selectedKeyframeId: id }),
     setSelectedNodeIndex: (index) => set({ selectedNodeIndex: index }),
+    setNodeDragPosition: (pos) => set({ nodeDragPosition: pos }),
     setTrackDefaultEasing: (layerId, property, easing) => set((s) => ({
         animatedObjects: s.animatedObjects.map(ao =>
             ao.id === layerId

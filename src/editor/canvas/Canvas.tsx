@@ -4,7 +4,7 @@ import { useEditorStore } from '../../store/editorStore';
 import ToolCluster from "../toolbar/ToolCluster";
 import type { ToolItem } from "../toolbar/ToolCluster";
 import { compileTimeline } from '../timeline/timelineCompiler';
-import { parsePathAnchors, parsePathAnchorsFromCmds, cloneCmds, pathCanvasToLocal, pathLocalToCanvas } from './pathNodeEditor';
+import { parsePathAnchors, parsePathAnchorsFromCmds, cloneCmds, pathCanvasToLocal, pathLocalToCanvas, getNodePoint } from './pathNodeEditor';
 import { setupPathNodeControls, teardownPathNodeControls, hasPathNodeControls } from './pathNodeControls';
 import type { PathAnchorNode } from './pathNodeEditor';
 import { CanvasController } from './CanvasController';
@@ -162,7 +162,7 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
     const draftState = useRef<DraftState | null>(null);
     const draggingDraftAnchor = useRef<{ pathObj: fabric.Path; anchorIdx: number; indicator: fabric.Object } | null>(null);
 
-    const { selectedLayerId, selectedKeyframeId, removeLayer, undo, redo, selectLayer, addLayer, setTool, setSelectedObjectIds, setActiveObjectProperties, setSelectedNodeIndex, setZoom: setStoreZoom } = useEditorStore();
+    const { selectedLayerId, selectedKeyframeId, removeLayer, undo, redo, selectLayer, addLayer, setTool, setSelectedObjectIds, setActiveObjectProperties, setSelectedNodeIndex, setNodeDragPosition, setZoom: setStoreZoom } = useEditorStore();
 
     const addTextToCanvas = useCallback(() => {
         if (!canvas) return;
@@ -295,20 +295,22 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
         const dot = new fabric.Circle({ left: pt.x, top: pt.y, radius: color === '#f59e0b' ? 4 : 3, fill: color, selectable: false, evented: false, originX: 'center', originY: 'center' });
         canvas.add(dot); penHelpers.current.push(dot);
     }, [canvas]);
-    const finalizePenPath = useCallback(() => {
+    const finalizePenPath = useCallback((close = false) => {
         if (!canvas || penPoints.current.length < 2) { cleanupPen(); return; }
-        const d = buildPenPathD();
+        let d = buildPenPathD();
+        if (close) d += ' Z';
         const id = crypto.randomUUID();
         const count = canvas.getObjects().filter(o => o.data?.type === 'path').length + 1;
         const path = new fabric.Path(d, {
             fill: undefined, stroke: '#6366f1', strokeWidth: 2,
             strokeLineJoin: 'round', strokeLineCap: 'round',
+            padding: 10, strokeUniform: true,
             data: { id, type: 'path' },
         });
         canvas.add(path); canvas.setActiveObject(path); canvas.renderAll();
         addLayer({ id, name: `Path ${count}`, type: 'path', visible: true, locked: false });
         cleanupPen();
-        setTool('transform');
+        setTool(close ? 'node' : 'transform');
     }, [canvas, addLayer, buildPenPathD, cleanupPen, setTool]);
     const completePenPath = useCallback(() => {
         if (penPoints.current.length >= 2) finalizePenPath(); else cleanupPen();
@@ -320,8 +322,7 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
 
         const onMouseDown = (e: fabric.IEvent) => {
             if (penCloseSnap.current && penPoints.current.length >= 2) {
-                // Close path: click on first anchor
-                finalizePenPath();
+                finalizePenPath(true);
                 return;
             }
             const ptr = canvas.getPointer(e.e);
@@ -482,7 +483,7 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
         canvas.defaultCursor = 'crosshair'; canvas.selection = false;
         const onMouseDown = (e: fabric.IEvent) => { isDrawingPencil.current = true; const ptr = canvas.getPointer(e.e); pencilPoints.current = [{ x: ptr.x, y: ptr.y }]; };
         const onMouseMove = (e: fabric.IEvent) => { if (!isDrawingPencil.current) return; const ptr = canvas.getPointer(e.e); pencilPoints.current.push({ x: ptr.x, y: ptr.y }); const simplified = simplifyPath(pencilPoints.current, 2); const pathData = pointsToSvgPath(simplified.flatMap(p => [p])); if (pencilPreview.current) canvas.remove(pencilPreview.current); if (pathData) { const path = new fabric.Path(pathData, { fill: undefined, stroke: '#6366f1', strokeWidth: 2, selectable: false, evented: false }); canvas.add(path); pencilPreview.current = path; } canvas.renderAll(); };
-        const onMouseUp = () => { isDrawingPencil.current = false; if (pencilPoints.current.length < 3) { if (pencilPreview.current) { canvas.remove(pencilPreview.current); pencilPreview.current = null; } canvas.renderAll(); return; } const simplified = simplifyPath(pencilPoints.current, 2); const pathData = pointsToSvgPath(simplified); const id = crypto.randomUUID(); const path = new fabric.Path(pathData, { fill: undefined, stroke: '#6366f1', strokeWidth: 2, strokeLineJoin: 'round', strokeLineCap: 'round', data: { id, type: 'path' } }); canvas.add(path); canvas.setActiveObject(path); canvas.renderAll(); const count = canvas.getObjects().filter(o => o.data?.type === 'path').length; addLayer({ id, name: `Pencil ${count}`, type: 'path', visible: true, locked: false }); if (pencilPreview.current) { canvas.remove(pencilPreview.current); pencilPreview.current = null; } pencilPoints.current = []; setTool('transform'); };
+        const onMouseUp = () => { isDrawingPencil.current = false; if (pencilPoints.current.length < 3) { if (pencilPreview.current) { canvas.remove(pencilPreview.current); pencilPreview.current = null; } canvas.renderAll(); return; } const simplified = simplifyPath(pencilPoints.current, 2); const pathData = pointsToSvgPath(simplified); const id = crypto.randomUUID(); const path = new fabric.Path(pathData, { fill: undefined, stroke: '#6366f1', strokeWidth: 2, strokeLineJoin: 'round', strokeLineCap: 'round', padding: 10, strokeUniform: true, data: { id, type: 'path' } }); canvas.add(path); canvas.setActiveObject(path); canvas.renderAll(); const count = canvas.getObjects().filter(o => o.data?.type === 'path').length; addLayer({ id, name: `Pencil ${count}`, type: 'path', visible: true, locked: false }); if (pencilPreview.current) { canvas.remove(pencilPreview.current); pencilPreview.current = null; } pencilPoints.current = []; setTool('transform'); };
         canvas.on('mouse:down', onMouseDown); canvas.on('mouse:move', onMouseMove); canvas.on('mouse:up', onMouseUp);
         return () => { canvas.off('mouse:down', onMouseDown); canvas.off('mouse:move', onMouseMove); canvas.off('mouse:up', onMouseUp); if (pencilPreview.current) { canvas.remove(pencilPreview.current); pencilPreview.current = null; } pencilPoints.current = []; canvas.defaultCursor = 'default'; canvas.selection = true; };
     }, [activeTool, canvas, addLayer, setTool]);
@@ -545,7 +546,7 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
             redoStack: [],
         });
         // Apply final path data & restore caching/handles synchronously
-        pathObj.set({ path: draftCmds as any, objectCaching: true, hasControls: true, hasBorders: true });
+        pathObj.set({ path: draftCmds as any, padding: 10, strokeUniform: true, objectCaching: true, hasControls: true, hasBorders: true });
         pathObj.setCoords();
         canvas.requestRenderAll();
         draftState.current = null;
@@ -558,7 +559,7 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
         if (!canvas || !draftState.current) return;
         clearDraftIndicators();
         const { pathObj, originalCmds } = draftState.current;
-        pathObj.set({ path: cloneCmds(originalCmds) as any, objectCaching: true, hasControls: true, hasBorders: true });
+        pathObj.set({ path: cloneCmds(originalCmds) as any, padding: 10, strokeUniform: true, objectCaching: true, hasControls: true, hasBorders: true });
         pathObj.setCoords();
         canvas.requestRenderAll();
         draftState.current = null;
@@ -606,6 +607,7 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
             strokeWidth: o.strokeWidth ?? 2, opacity: o.opacity ?? 1,
             strokeLineCap: o.strokeLineCap ?? 'round',
             strokeLineJoin: o.strokeLineJoin ?? 'round',
+            padding: 10, strokeUniform: true,
             data: { ...(o.data || {}), type: 'path', originalType: type, convertedFrom: o.data?.id },
         });
         canvas.remove(obj);
@@ -880,39 +882,50 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
         const aidx = anchorIdx;
         const anchor = anchors[aidx];
         const isClosed = ds.isClosed;
-        const prevAnchor = aidx > 0 ? anchors[aidx - 1] : (isClosed ? anchors[anchors.length - 1] : null);
-        const nextAnchor = aidx < anchors.length - 1 ? anchors[aidx + 1] : (isClosed ? anchors[0] : null);
-        const cmdToRemove = anchor.cmdIdx;
 
-        // Handle previous command's handleOut (C → L conversion)
-        if (prevAnchor && prevAnchor.handleOut) {
-            const prevCmd = cmds[prevAnchor.cmdIdx];
-            if (prevCmd && prevCmd[0] === 'C') {
-                prevCmd[0] = 'L';
-                prevCmd.length = 3;
-                prevCmd[1] = anchor.x;
-                prevCmd[2] = anchor.y;
-            }
-        }
-        // Adjust next command's handleIn to point toward previous anchor
-        if (nextAnchor && nextAnchor.handleIn) {
-            const nextCmd = cmds[nextAnchor.cmdIdx];
-            if (nextCmd && nextCmd[0] === 'C') {
-                const prevPt = prevAnchor ? { x: prevAnchor.x, y: prevAnchor.y } : { x: anchor.x - 50, y: anchor.y };
-                const dx = nextAnchor.x - prevPt.x;
-                const dy = nextAnchor.y - prevPt.y;
-                nextCmd[3] = nextAnchor.x - dx * 0.3;
-                nextCmd[4] = nextAnchor.y - dy * 0.3;
-            }
+        // Determine adjacent anchors
+        let prevIdx = aidx - 1;
+        let nextIdx = aidx + 1;
+        if (prevIdx < 0) { prevIdx = isClosed && anchors.length > 1 ? anchors.length - 1 : -1; }
+        if (nextIdx >= anchors.length) { nextIdx = isClosed && anchors.length > 1 ? 0 : -1; }
+        if (prevIdx < 0 || nextIdx < 0) return;
+
+        const prevAnchor = anchors[prevIdx];
+        const nextAnchor = anchors[nextIdx];
+
+        // Build a smooth bezier segment from prevAnchor to nextAnchor
+        // preserving handle directions where available
+        const hasPrevHandle = !!prevAnchor.handleOut;
+        const hasNextHandle = !!nextAnchor.handleIn;
+        let newCmd: any[];
+
+        if (hasPrevHandle || hasNextHandle) {
+            const hOut = hasPrevHandle
+                ? { x: prevAnchor.handleOut!.x, y: prevAnchor.handleOut!.y }
+                : {
+                    x: prevAnchor.x + (nextAnchor.x - prevAnchor.x) * 0.3,
+                    y: prevAnchor.y + (nextAnchor.y - prevAnchor.y) * 0.3,
+                };
+            const hIn = hasNextHandle
+                ? { x: nextAnchor.handleIn!.x, y: nextAnchor.handleIn!.y }
+                : {
+                    x: nextAnchor.x - (nextAnchor.x - prevAnchor.x) * 0.3,
+                    y: nextAnchor.y - (nextAnchor.y - prevAnchor.y) * 0.3,
+                };
+            newCmd = ['C', hOut.x, hOut.y, hIn.x, hIn.y, nextAnchor.x, nextAnchor.y];
+        } else {
+            newCmd = ['L', nextAnchor.x, nextAnchor.y];
         }
 
-        cmds.splice(cmdToRemove, 1);
-        // If first anchor was M and was removed, ensure a new M exists
+        // Remove commands from anchor through nextAnchor and insert new connection
+        const removeStart = anchor.cmdIdx;
+        const removeEnd = nextAnchor.cmdIdx;
+        const removeCount = removeEnd - removeStart + 1;
+        cmds.splice(removeStart, removeCount, newCmd);
+
+        // If first anchor was removed, ensure an M command exists at start
         if (aidx === 0 && cmds.length > 0 && cmds[0][0] !== 'M') {
-            const reparse = parsePathAnchorsFromCmds(cmds);
-            if (reparse.length > 0) {
-                cmds.unshift(['M', reparse[0].x, reparse[0].y]);
-            }
+            cmds.unshift(['M', nextAnchor.x, nextAnchor.y]);
         }
     }, []);
 
@@ -1118,6 +1131,9 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
                 const finalCmds = ((pathObj.path || []) as any).slice();
                 pathObj.set({ path: finalCmds as any, objectCaching: false });
                 pathObj.setCoords();
+                // Add padding for stroke + uniform stroke before restoring cache
+                pathObj.set({ padding: 10, strokeUniform: true });
+                pathObj.setCoords();
                 // Restore caching
                 pathObj.set({ objectCaching: true });
             }
@@ -1125,12 +1141,40 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
         canvas.renderAll();
     }, [canvas, setSelectedNodeIndex]);
 
-    const showNodeHandles = useCallback((targetObj: fabric.Object) => {
+    const showNodeHandles = useCallback((targetObj: fabric.Object, forceRefresh = false) => {
         if (!canvas) return;
         const type = targetObj.type;
 
-        // If the path already has custom node controls, just re-render
-        // to avoid coordinate drift from teardownPathNodeControls → setPathInfo → pathOffset shift
+        // Force-refresh path: teardown + re-setup WITHOUT cleanupNodeHandles
+        // so selectedNodeIndex and active-object selection are preserved.
+        if (type === 'path' && forceRefresh && hasPathNodeControls(targetObj as fabric.Path)) {
+            const pathObj = targetObj as fabric.Path;
+            teardownPathNodeControls(pathObj);
+            pathObj.set({ objectCaching: false });
+            const anchors = parsePathAnchors(pathObj);
+            pathNodeCache.current = { objId: pathObj.data?.id as string || '', anchors };
+            setupPathNodeControls(pathObj, anchors, (nodeIndex) => {
+                const s = useEditorStore.getState();
+                if (s.selectedNodeIndex === nodeIndex) {
+                    const pt = getNodePoint(pathObj, nodeIndex);
+                    if (pt) {
+                        const matrix = pathObj.calcTransformMatrix();
+                        const worldPt = fabric.util.transformPoint(new fabric.Point(pt.x, pt.y), matrix);
+                        setNodeDragPosition({ x: Math.round(worldPt.x), y: Math.round(worldPt.y) });
+                    }
+                }
+            });
+            canvas.renderAll();
+            setActiveObjectProperties({
+                x: Math.round((pathObj.left || 0) * 10) / 10,
+                y: Math.round((pathObj.top || 0) * 10) / 10,
+                rotation: Math.round(pathObj.angle || 0),
+                scaleX: pathObj.scaleX !== undefined ? Number(pathObj.scaleX.toFixed(3)) : 1,
+                scaleY: pathObj.scaleY !== undefined ? Number(pathObj.scaleY.toFixed(3)) : 1,
+            });
+            return;
+        }
+
         if (type === 'path' && hasPathNodeControls(targetObj as fabric.Path)) {
             canvas.renderAll();
             return;
@@ -1164,13 +1208,21 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
         // --- fabric.Path (using fabric.Control) ---
         if (type === 'path') {
             const pathObj = targetObj as fabric.Path;
-            // Disable objectCaching to prevent clipping during live editing
             pathObj.set({ objectCaching: false });
             const anchors = parsePathAnchors(pathObj);
             pathNodeCache.current = { objId: pathObj.data?.id as string || '', anchors };
-            setupPathNodeControls(pathObj, anchors);
+            setupPathNodeControls(pathObj, anchors, (nodeIndex) => {
+                const s = useEditorStore.getState();
+                if (s.selectedNodeIndex === nodeIndex) {
+                    const pt = getNodePoint(pathObj, nodeIndex);
+                    if (pt) {
+                        const matrix = pathObj.calcTransformMatrix();
+                        const worldPt = fabric.util.transformPoint(new fabric.Point(pt.x, pt.y), matrix);
+                        setNodeDragPosition({ x: Math.round(worldPt.x), y: Math.round(worldPt.y) });
+                    }
+                }
+            });
             canvas.renderAll();
-            // Sync path bounding box to store for [PATH] section
             setActiveObjectProperties({
                 x: Math.round((pathObj.left || 0) * 10) / 10,
                 y: Math.round((pathObj.top || 0) * 10) / 10,
@@ -1183,7 +1235,7 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
 
         // Fallback: unsupported type
         cleanupNodeHandles();
-    }, [canvas, cleanupNodeHandles]);
+    }, [canvas, cleanupNodeHandles, setActiveObjectProperties, setNodeDragPosition]);
 
     useEffect(() => {
         if (!canvas) return;
@@ -1192,6 +1244,19 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
         canvas.defaultCursor = 'crosshair';
         canvas.forEachObject((obj) => { obj.hoverCursor = 'move'; });
         canvas.selection = false;
+
+        // On mount: show node handles for an already-selected object
+        // (e.g. after Pen Tool closes a path)
+        let initial = canvas.getActiveObject();
+        if (initial) {
+            if (initial.type !== 'path') {
+                const result = convertShapeToPath(initial);
+                if (result) initial = canvas.getActiveObject();
+            }
+            if (initial && initial.type === 'path') {
+                showNodeHandles(initial);
+            }
+        }
 
         let skipOnSelection = false;
 
@@ -1289,6 +1354,7 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
                         }
                         if (nearestDist < 15) {
                             setSelectedNodeIndex(nearestIdx);
+                            canvas.renderAll();
                         }
                     }
                 }
@@ -1339,7 +1405,7 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
             if (!obj || obj.type !== 'path') return;
             const activeObj = canvas.getActiveObject();
             if (activeObj === obj) {
-                showNodeHandles(obj);
+                showNodeHandles(obj, true);
             }
         };
         canvas.on('object:modified', onObjectModified);
