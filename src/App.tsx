@@ -17,7 +17,6 @@ export default function App() {
     const [showExportMenu, setShowExportMenu] = useState(false);
     const exportMenuRef = useRef<HTMLDivElement>(null);
 
-    // Auto-load project from localStorage
     useEffect(() => { loadFromStorage(); }, []);
 
     useEffect(() => {
@@ -35,41 +34,25 @@ export default function App() {
         if (!canvas) return;
         try {
             const svgString = await readSvgFile(file);
-            const { objects, layers: newLayers } = await parseSvgString(svgString);
-            if (objects.length === 0) return;
+            const folderName = file.name.replace(/\.svg$/i, '');
+            const { objects, layers: newLayers } = await parseSvgString(svgString, folderName);
+            
+            if (!objects || objects.length === 0) return;
 
-            objects.forEach(obj => canvas.add(obj));
-
-            const canvasWidth = canvas.getWidth();
-            const canvasHeight = canvas.getHeight();
-
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            objects.forEach(obj => {
-                const b = obj.getBoundingRect();
-                if (b.left < minX) minX = b.left;
-                if (b.top < minY) minY = b.top;
-                if (b.left + b.width > maxX) maxX = b.left + b.width;
-                if (b.top + b.height > maxY) maxY = b.top + b.height;
-            });
-
-            const centerX = (minX + maxX) / 2;
-            const centerY = (minY + maxY) / 2;
-            const offsetX = canvasWidth / 2 - centerX;
-            const offsetY = canvasHeight / 2 - centerY;
+            canvas.clear();
+            canvas.setBackgroundColor('#FFFFFF', () => {});
 
             objects.forEach(obj => {
-                obj.set({
-                    left: (obj.left || 0) + offsetX,
-                    top: (obj.top || 0) + offsetY,
-                });
+                canvas.add(obj);
                 obj.setCoords();
-                if (obj.type === 'group') {
-                    (obj as fabric.Group).getObjects().forEach(child => child.setCoords());
-                }
             });
 
-            newLayers.forEach(l => useEditorStore.getState().addLayer(l));
+            canvas.discardActiveObject();
+            canvas.calcOffset();
             canvas.renderAll();
+
+            // Ghi đè Layers vào Store
+            useEditorStore.getState().setLayers(newLayers);
         } catch (err) {
             console.error('Import SVG failed:', err);
             alert('Failed to import SVG. Make sure the file is a valid SVG.');
@@ -144,7 +127,6 @@ export default function App() {
                     <main className="flex-1 flex items-center justify-center overflow-hidden bg-slate-900/50">
                         <Canvas fabricCanvasRef={fabricCanvasRef} onCanvasReady={setCanvasInstance} />
                     </main>
-
                 </div>
 
                 {/* Right Sidebar */}

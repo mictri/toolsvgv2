@@ -4,6 +4,12 @@ import { Layer } from '../store/editorStore';
 export interface SvgParseResult {
     objects: fabric.Object[];
     layers: Layer[];
+    svgWidth: number;
+    svgHeight: number;
+}
+
+interface TypeCounter {
+    [shapeType: string]: number;
 }
 
 interface CssRule {
@@ -43,10 +49,6 @@ const CSS_ATTR_MAP: Record<string, string> = {
     'stroke-width': 'stroke-width',
     opacity: 'opacity',
     'stroke-opacity': 'stroke-opacity',
-    'stroke-linecap': 'stroke-linecap',
-    'stroke-linejoin': 'stroke-linejoin',
-    'stroke-dasharray': 'stroke-dasharray',
-    'stroke-miterlimit': 'stroke-miterlimit',
 };
 
 function inlineCssStyles(root: Element, rules: CssRule[]) {
@@ -63,14 +65,70 @@ function inlineCssStyles(root: Element, rules: CssRule[]) {
     });
 }
 
-function generateName(originalId: string, fallback: string, index: number): string {
-    return originalId || `${fallback} ${index}`;
+function shapeTypeLabel(objType: string): string {
+    const map: Record<string, string> = {
+        path: 'Path', circle: 'Circle', rect: 'Rect', ellipse: 'Ellipse',
+        polygon: 'Polygon', polyline: 'Polyline', line: 'Line', text: 'Text',
+        image: 'Image',
+    };
+    return map[objType] || objType.charAt(0).toUpperCase() + objType.slice(1);
 }
 
-export async function parseSvgString(svgString: string): Promise<SvgParseResult> {
+function parseSvgDimensions(svgRoot: Element): { width: number; height: number } {
+    const vb = svgRoot.getAttribute('viewBox');
+    if (vb) {
+        const parts = vb.trim().split(/\s+/).map(Number);
+        if (parts.length === 4 && !parts.some(isNaN)) {
+            return { width: parts[2], height: parts[3] };
+        }
+    }
+    const w = svgRoot.getAttribute('width');
+    const h = svgRoot.getAttribute('height');
+    if (w && h) {
+        const pw = parseFloat(w);
+        const ph = parseFloat(h);
+        if (!isNaN(pw) && !isNaN(ph)) {
+            return { width: pw, height: ph };
+        }
+    }
+    return { width: 800, height: 600 };
+}
+
+/** Flatten nested groups — extract all leaf objects recursively */
+function flattenObjects(objs: fabric.Object[]): fabric.Object[] {
+    const result: fabric.Object[] = [];
+    for (const obj of objs) {
+        if (!obj) continue;
+        if (obj.type === 'group') {
+            result.push(...flattenObjects((obj as fabric.Group).getObjects()));
+        } else {
+            result.push(obj);
+        }
+    }
+    return result;
+}
+
+/** Ensure leaf objects have a visible fill */
+function ensureFill(obj: fabric.Object) {
+    if (obj.type === 'group') {
+        (obj as fabric.Group).getObjects().forEach(ensureFill);
+        return;
+    }
+    const fill = obj.get('fill') as string | undefined;
+    const stroke = obj.get('stroke') as string | undefined;
+    if ((!fill || fill === 'none' || fill === 'transparent') && (!stroke || stroke === 'none')) {
+        obj.set('fill', '#4285f4');
+    }
+    if (!obj.get('opacity')) obj.set('opacity', 1);
+    obj.set('visible', true);
+}
+
+export async function parseSvgString(svgString: string, folderName?: string): Promise<SvgParseResult> {
     const parser = new DOMParser();
     const doc = parser.parseFromString(svgString, 'image/svg+xml');
     const svgRoot = doc.documentElement;
+
+    const { width: svgWidth, height: svgHeight } = parseSvgDimensions(svgRoot);
 
     const cssRules = parseCssStyles(svgRoot);
     inlineCssStyles(svgRoot, cssRules);
@@ -78,83 +136,135 @@ export async function parseSvgString(svgString: string): Promise<SvgParseResult>
     const modifiedSvg = new XMLSerializer().serializeToString(svgRoot);
 
     return new Promise((resolve, reject) => {
-        const layerInfoMap = new Map<fabric.Object, { originalId: string; svgElement: Element | null }>();
+        const layerInfoMap = new Map<fabric.Object, { originalId: string }>();
 
-        fabric.loadSVGFromString(modifiedSvg, (objects) => {
-            if (!objects || objects.length === 0) {
-                reject(new Error('No objects found in SVG'));
-                return;
-            }
+        fabric.loadSVGFromString(modifiedSvg, (rawObjects) => {
+            try {
+                if (!rawObjects || rawObjects.length === 0) {
+                    reject(new Error('No objects found in SVG'));
+                    return;
+                }
 
-            let nameCounter = 0;
-            const layers: Layer[] = [];
+                // Flatten all nested groups into a single-level array
+                const flat = flattenObjects(rawObjects.filter(Boolean));
+                if (flat.length === 0) {
+                    reject(new Error('No valid objects extracted'));
+                    return;
+                }
 
-            function setOriginCenter(obj: fabric.Object) {
-                obj.set('originX', 'center');
-                obj.set('originY', 'center');
-                obj.setCoords();
-            }
+                // Ensure every object has a visible fill
+                flat.forEach(ensureFill);
 
-            function processObject(obj: fabric.Object, parentId: string | null): string {
-                const id = crypto.randomUUID();
-                const info = layerInfoMap.get(obj);
-                const originalId = info?.originalId || '';
-                nameCounter++;
+                const typeCounters: TypeCounter = {};
+                const layers: Layer[] = [];
+                const resultObjects: fabric.Object[] = [];
 
-                if (obj.type === 'group') {
-                    const group = obj as fabric.Group;
+                // Compute combined bounding box of all flat objects (absolute coords)
+                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                flat.forEach(obj => {
+                    obj.set({ originX: 'center', originY: 'center' });
+                    obj.setCoords();
+                    const r = obj.getBoundingRect(true, true);
+                    if (r.left < minX) minX = r.left;
+                    if (r.top < minY) minY = r.top;
+                    if (r.left + r.width > maxX) maxX = r.left + r.width;
+                    if (r.top + r.height > maxY) maxY = r.top + r.height;
+                });
 
-                    setOriginCenter(group);
+                const groupW = (maxX - minX) || 1;
+                const groupH = (maxY - minY) || 1;
+                const groupCx = minX + groupW / 2;
+                const groupCy = minY + groupH / 2;
 
-                    const layer: Layer = {
+                // Fixed canvas 350x350 → center at (175, 175)
+                const CANVAS_SIZE = 350;
+                const canvasCenterX = CANVAS_SIZE / 2; // 175
+                const canvasCenterY = CANVAS_SIZE / 2;
+
+                // Scale if SVG larger than 280px (80% of 350)
+                const maxAllowed = 280;
+                let fitScale = 1;
+                if (groupW > maxAllowed || groupH > maxAllowed) {
+                    fitScale = Math.min(maxAllowed / groupW, maxAllowed / groupH);
+                }
+
+                const nextName = (objType: string, originalId: string): string => {
+                    if (originalId) return originalId;
+                    const label = shapeTypeLabel(objType);
+                    typeCounters[label] = (typeCounters[label] || 0) + 1;
+                    return `${label} ${typeCounters[label]}`;
+                };
+
+                // Process each flat object: center at (175,175), scale, set id
+                flat.forEach(obj => {
+                    const info = layerInfoMap.get(obj);
+                    const originalId = info?.originalId || '';
+                    const id = crypto.randomUUID();
+                    const objType = obj.type || 'path';
+
+                    const cp = obj.getCenterPoint();
+                    const newX = canvasCenterX + (cp.x - groupCx) * fitScale;
+                    const newY = canvasCenterY + (cp.y - groupCy) * fitScale;
+
+                    obj.set({
+                        originX: 'center',
+                        originY: 'center',
+                        left: newX,
+                        top: newY,
+                        scaleX: (obj.scaleX || 1) * fitScale,
+                        scaleY: (obj.scaleY || 1) * fitScale,
+                        selectable: true,
+                        evented: true,
+                        hasControls: true,
+                        hasBorders: true,
+                        visible: true,
+                    });
+                    obj.setCoords();
+
+                    (obj as any).id = id;
+                    obj.set('data', { id, originalId });
+
+                    layers.push({
                         id,
-                        name: generateName(originalId, `Group ${nameCounter}`, nameCounter),
+                        name: originalId || nextName(objType, ''),
+                        type: objType === 'path' ? 'path' : 'svg',
+                        visible: true,
+                        locked: false,
+                        parentId: null,
+                        originalId,
+                        childrenIds: [],
+                    });
+
+                    resultObjects.push(obj);
+                });
+
+                // Wrap all layers under a folder if folderName provided
+                if (folderName && layers.length > 0) {
+                    const folderId = crypto.randomUUID();
+                    const childIds = layers.map(l => l.id);
+                    layers.forEach(l => { l.parentId = folderId; });
+                    layers.unshift({
+                        id: folderId,
+                        name: folderName,
                         type: 'group',
                         visible: true,
                         locked: false,
-                        parentId,
-                        originalId,
-                        childrenIds: [],
-                    };
-                    layers.push(layer);
-
-                    const childIds: string[] = [];
-                    group.getObjects().forEach(child => {
-                        childIds.push(processObject(child, id));
-                        setOriginCenter(child);
+                        parentId: null,
+                        originalId: '',
+                        childrenIds: childIds,
                     });
-                    layer.childrenIds = childIds;
-
-                    group.set('subTargetCheck', true);
-                    group.set('data', { ...(group.data || {}), id, originalId, type: 'group' });
-                } else {
-                    const typeName = obj.type || 'path';
-                    layers.push({
-                        id,
-                        name: generateName(originalId, `${typeName.charAt(0).toUpperCase() + typeName.slice(1)} ${nameCounter}`, nameCounter),
-                        type: typeName === 'path' ? 'path' : 'svg',
-                        visible: true,
-                        locked: false,
-                        parentId,
-                        originalId,
-                        childrenIds: [],
-                    });
-
-                    setOriginCenter(obj);
-                    obj.set('data', { ...(obj.data || {}), id, originalId });
                 }
 
-                return id;
+                resolve({ objects: resultObjects, layers, svgWidth, svgHeight });
+            } catch (err) {
+                console.error('parseSvgString crashed:', err);
+                reject(err);
             }
-
-            objects.forEach(obj => {
-                processObject(obj, null);
-            });
-
-            resolve({ objects, layers });
         }, (element: SVGElement, object: fabric.Object) => {
-            const originalId = element.getAttribute('id') || '';
-            layerInfoMap.set(object, { originalId, svgElement: element as Element | null });
+            if (element && object) {
+                const originalId = element.getAttribute('id') || '';
+                layerInfoMap.set(object, { originalId });
+            }
         });
     });
 }

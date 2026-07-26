@@ -17,8 +17,8 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
         animatedObjects,
         setIsPlaying, setCurrentTime, setDuration, setLoopMode, setTimelineZoom,
         addPropertyTrack, addKeyframeToTrack, updateKeyframeInTrack,
-        removeKeyframeFromTrack, removeSubTrack, setAnimatedObjectExpanded,
-        selectKeyframe, selectLayer, saveToStorage,
+        removeKeyframeFromTrack, setAnimatedObjectExpanded,
+        selectKeyframe, selectLayer, saveToStorage, removeAnimatedObject,
     } = useEditorStore();
 
     const LABEL_WIDTH = 256; // w-64 = 16rem = 256px
@@ -163,7 +163,18 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
     const handleAddProperty = (property: AnimatableProperty) => {
         const layerId = selectedLayerId;
         if (!layerId) return;
-        addPropertyTrack(layerId, property);
+        const obj = fabricCanvas?.getObjects().find(o => ((o as any).id === layerId || o.data?.id === layerId));
+        const baseState = obj ? {
+            left: obj.left || 0,
+            top: obj.top || 0,
+            scaleX: obj.scaleX || 1,
+            scaleY: obj.scaleY || 1,
+            angle: obj.angle || 0,
+            opacity: obj.opacity ?? 1,
+            fill: (obj.fill as string) || '#000000',
+            stroke: (obj.stroke as string) || '',
+        } : undefined;
+        addPropertyTrack(layerId, property, baseState);
         setShowAddProperty(false);
     };
 
@@ -384,13 +395,28 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                                                     title="Add keyframe at current playhead">
                                                     + Add
                                                 </button>
-                                                {/* Delete Sub-track */}
+                                                {/* Remove track from Timeline only */}
                                                 <button
                                                     onMouseDown={(e) => e.stopPropagation()}
                                                     onClick={(e) => {
                                                         e.stopPropagation();
                                                         e.preventDefault();
-                                                        removeSubTrack(ao.id, track.property);
+                                                        const obj = fabricCanvas?.getObjects().find(o => ((o as any).id === ao.id || o.data?.id === ao.id));
+                                                        if (obj && ao.baseState) {
+                                                            obj.set({
+                                                                left: ao.baseState.left,
+                                                                top: ao.baseState.top,
+                                                                scaleX: ao.baseState.scaleX,
+                                                                scaleY: ao.baseState.scaleY,
+                                                                angle: ao.baseState.angle,
+                                                                opacity: ao.baseState.opacity,
+                                                                fill: ao.baseState.fill,
+                                                                stroke: ao.baseState.stroke,
+                                                            });
+                                                            obj.setCoords();
+                                                            fabricCanvas?.renderAll();
+                                                        }
+                                                        removeAnimatedObject(ao.id);
                                                         compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
                                                     }}
                                                     className="text-slate-500 hover:text-rose-400 hover:bg-slate-800/80 rounded p-1 transition-colors ml-0.5"

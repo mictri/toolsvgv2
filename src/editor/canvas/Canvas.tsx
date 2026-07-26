@@ -176,14 +176,47 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
     const draftState = useRef<DraftState | null>(null);
     const draggingDraftAnchor = useRef<{ pathObj: fabric.Path; anchorIdx: number; indicator: fabric.Object } | null>(null);
 
-    const { selectedLayerId, selectedKeyframeId, removeLayer, undo, redo, selectLayer, addLayer, setTool, setSelectedObjectIds, setActiveObjectProperties } = useEditorStore();
+    const { selectedLayerId, selectedKeyframeId, removeLayer, undo, redo, selectLayer, addLayer, setTool, setSelectedObjectIds, setActiveObjectProperties, setZoom: setStoreZoom } = useEditorStore();
+    const canvasConfig = useEditorStore(s => s.canvasConfig);
 
     const applyZoom = useCallback((newZoom: number) => {
         if (!canvas) return;
-        canvas.setZoom(Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom)));
+        const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom));
+        canvas.setZoom(clamped);
         canvas.renderAll();
-        setZoom(canvas.getZoom());
-    }, [canvas]);
+        setZoom(clamped);
+        setStoreZoom(clamped);
+    }, [canvas, setStoreZoom]);
+
+    const fitCanvasToViewportCenter = useCallback(() => {
+        const c = canvas || fabricCanvasRef.current;
+        const container = containerRef.current;
+        if (!c || !container) return;
+        const containerWidth = container.clientWidth;
+        const containerHeight = container.clientHeight;
+        // Read fresh values from store to avoid stale closure
+        const cfg = useEditorStore.getState().canvasConfig;
+        const cw = cfg.width;
+        const ch = cfg.height;
+        if (cw <= 0 || ch <= 0) return;
+
+        const paddingFactor = 0.65;
+        const zoomX = (containerWidth * paddingFactor) / cw;
+        const zoomY = (containerHeight * paddingFactor) / ch;
+        let optimalZoom = Math.min(zoomX, zoomY);
+        optimalZoom = Math.max(0.1, Math.min(optimalZoom, 5));
+
+        const vpt = c.viewportTransform;
+        if (!vpt) return;
+        vpt[0] = optimalZoom;
+        vpt[3] = optimalZoom;
+        vpt[4] = (containerWidth - cw * optimalZoom) / 2;
+        vpt[5] = (containerHeight - ch * optimalZoom) / 2;
+        c.setViewportTransform(vpt);
+        c.requestRenderAll();
+        setZoom(optimalZoom);
+        setStoreZoom(optimalZoom);
+    }, [canvas, fabricCanvasRef, setStoreZoom]);
 
     const addTextToCanvas = useCallback(() => {
         if (!canvas) return;
@@ -217,7 +250,13 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
     // Init Canvas
     useEffect(() => {
         if (!canvasElRef.current) return;
-        const c = new fabric.Canvas(canvasElRef.current, { width: 800, height: 500, backgroundColor: '#1e293b', preserveObjectStacking: true });
+        const bg = canvasConfig.isTransparent ? undefined : canvasConfig.backgroundColor;
+        const c = new fabric.Canvas(canvasElRef.current, {
+            width: canvasConfig.width,
+            height: canvasConfig.height,
+            backgroundColor: bg,
+            preserveObjectStacking: true,
+        });
         fabricCanvasRef.current = c;
         setCanvas(c);
         if (typeof onCanvasReady === 'function') onCanvasReady(c);
@@ -226,8 +265,29 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
         c.on('selection:cleared', () => selectLayer(null));
         const handleScrub = () => c.renderAll();
         window.addEventListener('timeline-scrub', handleScrub);
-        return () => { window.removeEventListener('timeline-scrub', handleScrub); c.dispose(); };
+        // Listen for fit-canvas-viewport event
+        const handleFitViewport = () => fitCanvasToViewportCenter();
+        window.addEventListener('fit-canvas-viewport', handleFitViewport);
+        return () => {
+            window.removeEventListener('timeline-scrub', handleScrub);
+            window.removeEventListener('fit-canvas-viewport', handleFitViewport);
+            c.dispose();
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectLayer, onCanvasReady, fabricCanvasRef]);
+
+    // Sync canvasConfig changes to fabric canvas
+    useEffect(() => {
+        if (!canvas) return;
+        canvas.setWidth(canvasConfig.width);
+        canvas.setHeight(canvasConfig.height);
+        if (canvasConfig.isTransparent) {
+            canvas.setBackgroundColor(null as any, () => canvas.renderAll());
+        } else {
+            canvas.setBackgroundColor(canvasConfig.backgroundColor, () => canvas.renderAll());
+        }
+        canvas.renderAll();
+    }, [canvas, canvasConfig]);
 
     // === HAND TOOL ===
     useEffect(() => {

@@ -126,11 +126,23 @@ export interface PropertyTrack {
     defaultEasing: string;
 }
 
+export interface BaseState {
+    left: number;
+    top: number;
+    scaleX: number;
+    scaleY: number;
+    angle: number;
+    opacity: number;
+    fill: string;
+    stroke: string;
+}
+
 export interface AnimatedObject {
     id: string;
     objectName: string;
     tracks: PropertyTrack[];
     expanded: boolean;
+    baseState?: BaseState;
 }
 
 
@@ -138,6 +150,16 @@ export interface AnimatedObject {
 interface HistorySnapshot {
     layers: Layer[];
 }
+
+export interface CanvasConfig {
+    width: number;
+    height: number;
+    backgroundColor: string;
+    isTransparent: boolean;
+    preserveAspectRatio: string;
+}
+
+export const ROOT_LAYER_ID = 'root';
 
 export interface ActiveObjectProperties {
     x: number;
@@ -147,6 +169,10 @@ export interface ActiveObjectProperties {
     scaleY: number;
 }
 
+export interface ViewportState {
+    zoom: number;
+}
+
 interface EditorState {
     // ===== NHÓM 1: Canvas =====
     layers: Layer[];
@@ -154,6 +180,9 @@ interface EditorState {
     activeTool: string;
     selectedObjectIds: string[];
     activeObjectProperties: ActiveObjectProperties | null;
+    canvasConfig: CanvasConfig;
+    isCanvasInitialized: boolean;
+    zoom: number;
 
     // ===== NHÓM 2: Animation (Timeline) =====
     isPlaying: boolean;
@@ -181,6 +210,12 @@ interface EditorState {
     removeLayer: (id: string) => void;
     selectLayer: (id: string | null) => void;
     toggleLayerVisibility: (id: string) => void;
+    updateLayerName: (layerId: string, newName: string) => void;
+    reorderLayers: (fromIndex: number, toIndex: number) => void;
+    setLayers: (layers: Layer[]) => void;
+    updateCanvasConfig: (config: Partial<CanvasConfig>) => void;
+    setIsCanvasInitialized: (initialized: boolean) => void;
+    setZoom: (zoom: number) => void;
 
     setTool: (toolId: string) => void;
     setSelectedObjectIds: (ids: string[]) => void;
@@ -196,7 +231,7 @@ interface EditorState {
     setStarInnerRatio: (n: number) => void;
 
     // ===== Animation Actions =====
-    addPropertyTrack: (layerId: string, property: AnimatableProperty) => void;
+    addPropertyTrack: (layerId: string, property: AnimatableProperty, baseState?: BaseState) => void;
     removePropertyTrack: (layerId: string, property: AnimatableProperty) => void;
     removeSubTrack: (layerId: string, property: AnimatableProperty) => void;
     toggleTrackEnabled: (layerId: string, property: AnimatableProperty) => void;
@@ -208,6 +243,7 @@ interface EditorState {
     setSelectedNodeIndex: (index: number | null) => void;
     setTrackDefaultEasing: (layerId: string, property: AnimatableProperty, easing: string) => void;
     ensureAnimatedObject: (layerId: string, objectName: string) => void;
+    removeAnimatedObject: (layerId: string) => void;
     updateSubTrackEasing: (layerId: string, property: AnimatableProperty, easing: string) => void;
 
     // localStorage
@@ -226,6 +262,9 @@ const initialState = {
     activeTool: 'transform',
     selectedObjectIds: [] as string[],
     activeObjectProperties: null as ActiveObjectProperties | null,
+    canvasConfig: { width: 350, height: 350, backgroundColor: '#ffffff', isTransparent: false, preserveAspectRatio: 'xMidYMid meet' } as CanvasConfig,
+    isCanvasInitialized: false,
+    zoom: 1,
     isPlaying: false,
     currentTime: 0,
     duration: 5,
@@ -267,9 +306,29 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
     selectLayer: (id) => set({ selectedLayerId: id }),
 
-    toggleLayerVisibility: (id) => set((s) => ({
-        layers: s.layers.map(l => l.id === id ? { ...l, visible: !l.visible } : l)
-    })),
+    toggleLayerVisibility: (id) => set((s) => {
+        const target = s.layers.find(l => l.id === id);
+        if (!target) return {};
+        const newVisible = !target.visible;
+
+        const collectDescendantIds = (layerId: string, acc: string[] = []): string[] => {
+            const layer = s.layers.find(l => l.id === layerId);
+            if (!layer || layer.type !== 'group') return acc;
+            layer.childrenIds.forEach(cid => {
+                acc.push(cid);
+                collectDescendantIds(cid, acc);
+            });
+            return acc;
+        };
+
+        const affectedIds = new Set([id, ...collectDescendantIds(id)]);
+
+        return {
+            layers: s.layers.map(l =>
+                affectedIds.has(l.id) ? { ...l, visible: newVisible } : l
+            ),
+        };
+    }),
 
     setTool: (toolId) => set({ activeTool: toolId }),
     setSelectedObjectIds: (ids) => set({ selectedObjectIds: ids }),
@@ -299,7 +358,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         };
     }),
 
-    addPropertyTrack: (layerId, property) => set((s) => {
+    removeAnimatedObject: (layerId) => set((s) => ({
+        animatedObjects: s.animatedObjects.filter(ao => ao.id !== layerId),
+    })),
+
+    addPropertyTrack: (layerId, property, baseState) => set((s) => {
         const existing = s.animatedObjects.find(ao => ao.id === layerId);
         const newTrack = (): PropertyTrack => ({ property, keyframes: [], enabled: true, defaultEasing: 'power2.out' });
         if (!existing) {
@@ -310,6 +373,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
                     objectName: layer?.name || layerId,
                     tracks: [newTrack()],
                     expanded: true,
+                    baseState,
                 }],
             };
         }
@@ -494,6 +558,28 @@ export const useEditorStore = create<EditorState>((set, get) => ({
             selectedLayerId: null,
         });
     },
+
+    // ===== LAYER NAME & REORDER =====
+    updateLayerName: (layerId, newName) => set((s) => ({
+        layers: s.layers.map(l => l.id === layerId ? { ...l, name: newName } : l),
+    })),
+
+    reorderLayers: (fromIndex, toIndex) => set((s) => {
+        const flat = [...s.layers];
+        const [moved] = flat.splice(fromIndex, 1);
+        flat.splice(toIndex, 0, moved);
+        return { layers: flat };
+    }),
+
+    setLayers: (layers) => set({ layers }),
+
+    updateCanvasConfig: (config) => set((s) => ({
+        canvasConfig: { ...s.canvasConfig, ...config },
+    })),
+
+    setIsCanvasInitialized: (initialized) => set({ isCanvasInitialized: initialized }),
+
+    setZoom: (zoom) => set({ zoom }),
 
     // ===== PER-PROPERTY PRESETS =====
     updateSubTrackEasing: (layerId, property, easing) => set((s) => ({
