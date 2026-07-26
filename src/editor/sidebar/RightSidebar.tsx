@@ -1,20 +1,31 @@
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { useEditorStore, AnimatableProperty, ROOT_LAYER_ID } from '../../store/editorStore';
 import { compileTimeline } from '../timeline/timelineCompiler';
 import { fabric } from 'fabric';
-import { parsePathAnchors, updatePathAnchor } from '../canvas/pathNodeEditor';
+import { parsePathAnchors, updatePathAnchor, pathCanvasToLocal, setNodeType as applyPathNodeType } from '../canvas/pathNodeEditor';
 import { ChevronRight, ChevronDown, Link as LinkIcon, Unlink, ArrowUpDown, Ban, Copy } from 'lucide-react';
 import { HexColorPicker } from 'react-colorful';
+
+function findObjectById(container: fabric.Canvas | fabric.Group, id: string): fabric.Object | null {
+    for (const obj of container.getObjects()) {
+        if ((obj as any).id === id || (obj.data as any)?.id === id) return obj;
+        if (obj.type === 'group') {
+            const found = findObjectById(obj as fabric.Group, id);
+            if (found) return found;
+        }
+    }
+    return null;
+}
 
 interface RightSidebarProps {
     fabricCanvas: fabric.Canvas | React.MutableRefObject<fabric.Canvas | null> | null;
 }
 
-const NODE_TYPES = [
-    { id: 'corner', label: 'Corner Node' },
-    { id: 'smooth', label: 'Smooth Node' },
-    { id: 'symmetric', label: 'Symmetric Node' },
-];
+const NODE_TYPE_ICONS = {
+    corner: <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M3 3 L3 11 L11 11" /></svg>,
+    smooth: <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M3 3 C3 8, 11 8, 11 11" /></svg>,
+    symmetric: <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M3 3 C5 8, 9 8, 11 3" /><path d="M3 11 C5 6, 9 6, 11 11" /></svg>,
+};
 
 const calculatePathLength = (obj: any): number => {
     if (!obj) return 0;
@@ -44,16 +55,8 @@ function CanvasPropertiesGroup({ fabricCanvas }: RightSidebarProps) {
 
     const applySize = useCallback((w: number, h: number) => {
         updateCanvasConfig({ width: w, height: h });
-        const canvas = fabricCanvas && 'current' in fabricCanvas ? fabricCanvas.current : fabricCanvas;
-        if (canvas) {
-            try {
-                canvas.setWidth(w);
-                canvas.setHeight(h);
-                canvas.renderAll();
-            } catch { /* ignore */ }
-        }
-        window.dispatchEvent(new CustomEvent('fit-canvas-viewport'));
-    }, [fabricCanvas, updateCanvasConfig]);
+        window.dispatchEvent(new CustomEvent('resize-artboard', { detail: { width: Math.round(w), height: Math.round(h) } }));
+    }, [updateCanvasConfig]);
 
     const handleWidthChange = (raw: string) => {
         setWStr(raw);
@@ -72,26 +75,6 @@ function CanvasPropertiesGroup({ fabricCanvas }: RightSidebarProps) {
         const v = parseFloat(raw);
         if (isNaN(v) || v < 1) return;
         applySize(canvasConfig.width, v);
-    };
-
-    const handleFitToContent = () => {
-        const canvas = fabricCanvas && 'current' in fabricCanvas ? fabricCanvas.current : fabricCanvas;
-        if (!canvas) return;
-        const objects = canvas.getObjects();
-        if (objects.length === 0) return;
-        const bound = objects.reduce((b, obj) => {
-            const rect = obj.getBoundingRect();
-            return {
-                left: Math.min(b.left, rect.left),
-                top: Math.min(b.top, rect.top),
-                right: Math.max(b.right, rect.left + rect.width),
-                bottom: Math.max(b.bottom, rect.top + rect.height),
-            };
-        }, { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity });
-        const pad = 40;
-        const w = Math.round(bound.right - bound.left + pad * 2);
-        const h = Math.round(bound.bottom - bound.top + pad * 2);
-        applySize(w, h);
     };
 
     return (
@@ -125,13 +108,6 @@ function CanvasPropertiesGroup({ fabricCanvas }: RightSidebarProps) {
                     >
                         {aspectLocked ? <LinkIcon size={12} className="inline mr-1" /> : <Unlink size={12} className="inline mr-1" />}
                         Ratio
-                    </button>
-                    <button
-                        onClick={handleFitToContent}
-                        className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 hover:text-white transition-colors"
-                        title="Fit canvas to content"
-                    >
-                        Fit to Content
                     </button>
                 </div>
             </div>
@@ -260,7 +236,7 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
         if (!propTrack) return;
 
         if (!ao) {
-            const obj = activeCanvas.getObjects().find(o => ((o as any).id === selectedLayerId || o.data?.id === selectedLayerId));
+            const obj = findObjectById(activeCanvas, selectedLayerId);
             const baseState = obj ? {
                 left: obj.left || 0, top: obj.top || 0, scaleX: obj.scaleX || 1, scaleY: obj.scaleY || 1,
                 angle: obj.angle || 0, opacity: obj.opacity ?? 1, fill: (obj.fill as string) || '#000000', stroke: (obj.stroke as string) || ''
@@ -276,12 +252,45 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
     const activeCanvas = getActiveCanvas();
     const selectedObj = useMemo(() => {
         if (!activeCanvas || !selectedLayerId) return null;
-        return activeCanvas.getObjects().find(obj => obj.data?.id === selectedLayerId || (obj as any).id === selectedLayerId) ?? null;
+        return findObjectById(activeCanvas, selectedLayerId);
     }, [selectedLayerId, activeCanvas]);
 
     const isNodeTool = activeTool === 'node';
     const isPathObj = selectedObj instanceof fabric.Path;
     const isPolygonObj = selectedObj instanceof fabric.Polygon;
+
+    // === Two-Way Property Sync Engine ===
+    const rafIdRef = useRef<number | null>(null);
+    const pendingUpdateRef = useRef(false);
+    const updateNodeWorldPosRef = useRef<() => void>(() => {});
+
+    const updateNodeWorldPosition = useCallback(() => {
+        const obj = selectedObj;
+        if (!obj || selectedNodeIndex === null) return;
+        const matrix = obj.calcTransformMatrix();
+        if (isPathObj) {
+            const anchors = parsePathAnchors(obj as fabric.Path);
+            if (selectedNodeIndex < anchors.length) {
+                const worldPt = fabric.util.transformPoint(new fabric.Point(anchors[selectedNodeIndex].x, anchors[selectedNodeIndex].y), matrix);
+                setNodeX(String(Math.round(worldPt.x)));
+                setNodeY(String(Math.round(worldPt.y)));
+            }
+        } else if (isPolygonObj) {
+            const pts = (obj as fabric.Polygon).points || [];
+            if (selectedNodeIndex < pts.length) {
+                const pt = pts[selectedNodeIndex];
+                const off = (obj as fabric.Polygon).pathOffset || { x: 0, y: 0 };
+                const worldPt = fabric.util.transformPoint(new fabric.Point(pt.x - off.x, pt.y - off.y), matrix);
+                setNodeX(String(Math.round(worldPt.x)));
+                setNodeY(String(Math.round(worldPt.y)));
+            }
+        }
+    }, [selectedObj, isPathObj, isPolygonObj, selectedNodeIndex]);
+
+    // Sync ref with latest callback
+    useEffect(() => {
+        updateNodeWorldPosRef.current = updateNodeWorldPosition;
+    }, [updateNodeWorldPosition]);
 
     const pathAnchors = useMemo(() => {
         if (!isNodeTool || !isPathObj || !selectedObj) return [];
@@ -299,23 +308,29 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
     }, [isPathObj, selectedNodeIndex, pathAnchors]);
 
     useEffect(() => {
-        if (selectedAnchor) {
-            setNodeX(String(Math.round(selectedAnchor.x)));
-            setNodeY(String(Math.round(selectedAnchor.y)));
+        if (!selectedObj) return;
+        if (selectedAnchor && isPathObj) {
+            const m = (selectedObj as fabric.Path).calcTransformMatrix();
+            const worldPt = fabric.util.transformPoint(new fabric.Point(selectedAnchor.x, selectedAnchor.y), m);
+            setNodeX(String(Math.round(worldPt.x)));
+            setNodeY(String(Math.round(worldPt.y)));
             setNodeType(selectedAnchor.nodeType);
         } else if (isPolygonObj && selectedNodeIndex !== null && selectedNodeIndex < polygonPoints.length) {
             const pt = polygonPoints[selectedNodeIndex];
-            setNodeX(String(Math.round(pt.x)));
-            setNodeY(String(Math.round(pt.y)));
+            const matrix = (selectedObj as fabric.Polygon).calcTransformMatrix();
+            const off = (selectedObj as fabric.Polygon).pathOffset || { x: 0, y: 0 };
+            const worldPt = fabric.util.transformPoint(new fabric.Point(pt.x - off.x, pt.y - off.y), matrix);
+            setNodeX(String(Math.round(worldPt.x)));
+            setNodeY(String(Math.round(worldPt.y)));
         }
         if (selectedNodeIndex === null) {
             setNodeX('0'); setNodeY('0');
         }
-    }, [selectedAnchor, selectedNodeIndex, isPolygonObj, polygonPoints]);
+    }, [selectedAnchor, selectedNodeIndex, isPathObj, isPolygonObj, polygonPoints, selectedObj]);
 
     useEffect(() => {
         if (!activeCanvas || !selectedLayerId) return;
-        const targetObj = activeCanvas.getObjects().find(obj => obj.data?.id === selectedLayerId || (obj as any).id === selectedLayerId);
+        const targetObj = findObjectById(activeCanvas, selectedLayerId);
         if (!targetObj) return;
         const updateLocalStates = () => {
             setLeft(String(Math.round(targetObj.left || 0)));
@@ -334,18 +349,31 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
             setStrokeDashArray((targetObj.strokeDashArray && targetObj.strokeDashArray.length > 0) ? targetObj.strokeDashArray.join(', ') : '0');
             setStrokeDashOffset(String(targetObj.strokeDashOffset || 0));
             setPathLength(Number(calculatePathLength(targetObj)).toFixed(1));
+            updateNodeWorldPosRef.current();
+        };
+        const scheduleUpdate = () => {
+            if (pendingUpdateRef.current) return;
+            pendingUpdateRef.current = true;
+            if (rafIdRef.current !== null) cancelAnimationFrame(rafIdRef.current);
+            rafIdRef.current = requestAnimationFrame(() => {
+                pendingUpdateRef.current = false;
+                rafIdRef.current = null;
+                updateLocalStates();
+            });
         };
         updateLocalStates();
-        targetObj.on('moving', updateLocalStates);
-        targetObj.on('scaling', updateLocalStates);
-        targetObj.on('rotating', updateLocalStates);
-        targetObj.on('skewing', updateLocalStates);
+        targetObj.on('moving', scheduleUpdate);
+        targetObj.on('scaling', scheduleUpdate);
+        targetObj.on('rotating', scheduleUpdate);
+        targetObj.on('skewing', scheduleUpdate);
         targetObj.on('modified', updateLocalStates);
         return () => {
-            targetObj.off('moving', updateLocalStates);
-            targetObj.off('scaling', updateLocalStates);
-            targetObj.off('rotating', updateLocalStates);
-            targetObj.off('skewing', updateLocalStates);
+            if (rafIdRef.current !== null) cancelAnimationFrame(rafIdRef.current);
+            pendingUpdateRef.current = false;
+            targetObj.off('moving', scheduleUpdate);
+            targetObj.off('scaling', scheduleUpdate);
+            targetObj.off('rotating', scheduleUpdate);
+            targetObj.off('skewing', scheduleUpdate);
             targetObj.off('modified', updateLocalStates);
         };
     }, [selectedLayerId, currentTime, fabricCanvas]);
@@ -365,6 +393,7 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
         selectedObj.set(property as any, finalValue);
         selectedObj.setCoords();
         activeCanvas?.requestRenderAll();
+        updateNodeWorldPosRef.current();
 
         let trackValue: any;
         if (property === 'left' || property === 'top') {
@@ -411,6 +440,7 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
         
         selectedObj.setCoords();
         activeCanvas?.requestRenderAll();
+        updateNodeWorldPosRef.current();
         autoKeyframe('scaleX', { scaleX: newScaleX, scaleY: newScaleY });
     };
 
@@ -428,28 +458,154 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
     return (
         <div className="w-80 border-l border-slate-800 bg-slate-950 flex flex-col text-slate-200 h-full select-none overflow-x-hidden overflow-y-auto relative">
 
+
+            {/* PATH NODES */}
+            {isNodeTool && (isPathObj || isPolygonObj) && (
+                <div className="border-b border-slate-800/60 pb-2">
+                    <SectionHeader id="path" title="Path Nodes" />
+                    {sections.path && (
+                        <div className="p-2.5 flex flex-col gap-2 mx-2 mt-2 border border-slate-800/50 rounded bg-slate-900/40">
+                            {isPathObj && (
+                                <div>
+                                    <label className="text-[10px] text-slate-500 block mb-0.5">Node Type</label>
+                                    <div className="flex gap-1">
+                                        {(['corner', 'smooth', 'symmetric'] as const).map(type => (
+                                            <button key={type}
+                                                onClick={() => {
+                                                    setNodeType(type);
+                                                    if (selectedAnchor) {
+                                                        applyPathNodeType(selectedObj as fabric.Path, selectedAnchor, type);
+                                                        const pathObj = selectedObj as fabric.Path;
+                                                        pathObj.set({ path: (pathObj.path || []).slice() as any });
+                                                        pathObj.setCoords();
+                                                        getActiveCanvas()?.requestRenderAll();
+                                                    }
+                                                }}
+                                                className={`flex-1 flex flex-col items-center gap-0.5 py-1.5 px-1 rounded text-[9px] font-bold transition-all ${nodeType === type ? 'bg-amber-500/20 text-amber-400 border border-amber-500/50' : 'bg-slate-800/50 text-slate-500 border border-transparent hover:bg-slate-700 hover:text-slate-300'}`}
+                                                title={type.charAt(0).toUpperCase() + type.slice(1)}>
+                                                {NODE_TYPE_ICONS[type]}
+                                                <span className="text-[8px]">{type}</span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            <div className='flex items-center gap-2'>
+                                <label className="text-[10px] text-slate-500 block mb-0.5">Position</label>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <input type="number" value={nodeX} onChange={e => {
+                                        const v = parseFloat(e.target.value);
+                                        if (isNaN(v)) return;
+                                        setNodeX(e.target.value);
+                                        const worldY = parseFloat(nodeY);
+                                        if (isNaN(worldY)) return;
+                                        if (isPathObj && selectedAnchor) {
+                                            const pathObj = selectedObj as fabric.Path;
+                                            const localPt = pathCanvasToLocal(pathObj, { x: v, y: worldY });
+                                            updatePathAnchor(pathObj, selectedAnchor, localPt.x, localPt.y);
+                                            pathObj.set({ path: (pathObj.path || []).slice() as any });
+                                            pathObj.setCoords();
+                                            getActiveCanvas()?.requestRenderAll();
+                                            setLeft(String(Math.round(pathObj.left || 0)));
+                                            setTop(String(Math.round(pathObj.top || 0)));
+                                            setWidth(String(Math.round(pathObj.getScaledWidth())));
+                                            setHeight(String(Math.round(pathObj.getScaledHeight())));
+                                        } else if (isPolygonObj && selectedNodeIndex !== null) {
+                                            const poly = selectedObj as fabric.Polygon;
+                                            const matrix = poly.calcTransformMatrix();
+                                            const inv = fabric.util.invertTransform(matrix);
+                                            const localPt = fabric.util.transformPoint(new fabric.Point(v, worldY), inv);
+                                            const pts = [...(poly.points || [])];
+                                            pts[selectedNodeIndex] = localPt;
+                                            poly.set({ points: pts });
+                                            poly.setCoords();
+                                            getActiveCanvas()?.requestRenderAll();
+                                            setLeft(String(Math.round(poly.left || 0)));
+                                            setTop(String(Math.round(poly.top || 0)));
+                                            setWidth(String(Math.round(poly.getScaledWidth())));
+                                            setHeight(String(Math.round(poly.getScaledHeight())));
+                                        }
+                                    }} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-[11px] font-mono text-slate-100 focus:outline-none focus:border-amber-500" placeholder="X" />
+                                    <input type="number" value={nodeY} onChange={e => {
+                                        const v = parseFloat(e.target.value);
+                                        if (isNaN(v)) return;
+                                        setNodeY(e.target.value);
+                                        const worldX = parseFloat(nodeX);
+                                        if (isNaN(worldX)) return;
+                                        if (isPathObj && selectedAnchor) {
+                                            const pathObj = selectedObj as fabric.Path;
+                                            const localPt = pathCanvasToLocal(pathObj, { x: worldX, y: v });
+                                            updatePathAnchor(pathObj, selectedAnchor, localPt.x, localPt.y);
+                                            pathObj.set({ path: (pathObj.path || []).slice() as any });
+                                            pathObj.setCoords();
+                                            getActiveCanvas()?.requestRenderAll();
+                                            setLeft(String(Math.round(pathObj.left || 0)));
+                                            setTop(String(Math.round(pathObj.top || 0)));
+                                            setWidth(String(Math.round(pathObj.getScaledWidth())));
+                                            setHeight(String(Math.round(pathObj.getScaledHeight())));
+                                        } else if (isPolygonObj && selectedNodeIndex !== null) {
+                                            const poly = selectedObj as fabric.Polygon;
+                                            const matrix = poly.calcTransformMatrix();
+                                            const inv = fabric.util.invertTransform(matrix);
+                                            const localPt = fabric.util.transformPoint(new fabric.Point(worldX, v), inv);
+                                            const pts = [...(poly.points || [])];
+                                            pts[selectedNodeIndex] = localPt;
+                                            poly.set({ points: pts });
+                                            poly.setCoords();
+                                            getActiveCanvas()?.requestRenderAll();
+                                            setLeft(String(Math.round(poly.left || 0)));
+                                            setTop(String(Math.round(poly.top || 0)));
+                                            setWidth(String(Math.round(poly.getScaledWidth())));
+                                            setHeight(String(Math.round(poly.getScaledHeight())));
+                                        }
+                                    }} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-[11px] font-mono text-slate-100 focus:outline-none focus:border-amber-500" placeholder="Y" />
+                                </div>
+                            </div>
+                            
+                            <div className='flex items-center gap-2'><label className="text-[10px] text-slate-500 block mb-0.5">Corner Radius</label>
+                                <input type="number" min={0} value={cornerRadius} onChange={e => {
+                                    const v = parseFloat(e.target.value);
+                                    if (isNaN(v) || !selectedObj) return;
+                                    setCornerRadius(e.target.value);
+                                    (selectedObj as any).set({ rx: v, ry: v });
+                                    selectedObj.setCoords();
+                                    getActiveCanvas()?.requestRenderAll();
+                                }} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-[11px] font-mono text-slate-100 focus:outline-none focus:border-amber-500" /></div>
+
+                            <div className="flex items-center gap-1 flex-wrap mt-2">
+                                {(isPathObj ? pathAnchors : polygonPoints).map((_, i) => (
+                                    <button key={i} onClick={() => setSelectedNodeIndex(selectedNodeIndex === i ? null : i)} className={`w-5 h-5 rounded text-[9px] font-bold transition-all shadow-sm ${selectedNodeIndex === i ? 'bg-amber-500 text-white scale-110' : 'bg-slate-800 text-slate-500 hover:bg-slate-700'}`}>{i + 1}</button>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
             
             {/* POSITION & SIZE */}
             <div className="border-b border-slate-800/60">
                 <SectionHeader id="position" title="Position & Size" />
                 {sections.position && (
                     <div className="p-2.5 flex flex-col gap-2 bg-slate-950/50 relative z-10">
-                        <div className="grid grid-cols-2 gap-2">
-                            <div><label className="text-[10px] text-slate-500 block mb-0.5">X (Left)</label>
-                                <input type="number" value={left} onChange={e => setLeft(e.target.value)} onBlur={() => commitPropertyChange('left', left)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('left', left)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" /></div>
-                            <div><label className="text-[10px] text-slate-500 block mb-0.5">Y (Top)</label>
-                                <input type="number" value={top} onChange={e => setTop(e.target.value)} onBlur={() => commitPropertyChange('top', top)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('top', top)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" /></div>
-                        </div>
-                        <div className="flex items-end gap-1">
-                            <div className="grid grid-cols-2 gap-2 flex-1">
-                                <div><label className="text-[10px] text-slate-500 block mb-0.5">W (Width)</label>
-                                    <input type="number" value={width} onChange={e => setWidth(e.target.value)} onBlur={() => handleSizeCommit(true)} onKeyDown={e => e.key === 'Enter' && handleSizeCommit(true)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" /></div>
-                                <div><label className="text-[10px] text-slate-500 block mb-0.5">H (Height)</label>
-                                    <input type="number" value={height} onChange={e => setHeight(e.target.value)} onBlur={() => handleSizeCommit(false)} onKeyDown={e => e.key === 'Enter' && handleSizeCommit(false)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" /></div>
+                        <div className="flex items-center gap-2">
+                            <label className="text-[10px] text-slate-500 block mb-0.5">Position</label>
+                            <div className="grid grid-cols-2 gap-2">
+                                <input type="number" value={left} onChange={e => setLeft(e.target.value)} onBlur={() => commitPropertyChange('left', left)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('left', left)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" placeholder="X" />
+                                <input type="number" value={top} onChange={e => setTop(e.target.value)} onBlur={() => commitPropertyChange('top', top)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('top', top)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" placeholder="Y" />
                             </div>
-                            <button onClick={() => setAspectLocked(!aspectLocked)} className={`p-1.5 rounded transition-colors mb-[1px] ${aspectLocked ? 'bg-indigo-600' : 'bg-slate-800 hover:bg-slate-700'}`} title="Lock aspect ratio">
-                                {aspectLocked ? <LinkIcon size={12} className="text-white" /> : <Unlink size={12} className="text-slate-400" />}
-                            </button>
+                        </div>
+                       <div className="flex items-center gap-2">
+                            <label className="text-[10px] text-slate-500 block mb-0.5">Origin</label>
+                            <div className="flex items-end gap-1">
+                                <div className="grid grid-cols-2 gap-2 flex-1">
+                                    <input type="number" value={width} onChange={e => setWidth(e.target.value)} onBlur={() => handleSizeCommit(true)} onKeyDown={e => e.key === 'Enter' && handleSizeCommit(true)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" placeholder="W" />
+                                    <input type="number" value={height} onChange={e => setHeight(e.target.value)} onBlur={() => handleSizeCommit(false)} onKeyDown={e => e.key === 'Enter' && handleSizeCommit(false)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" placeholder="H" />
+                                </div>
+                                <button onClick={() => setAspectLocked(!aspectLocked)} className={`p-1.5 rounded transition-colors mb-[1px] ${aspectLocked ? 'bg-indigo-600' : 'bg-slate-800 hover:bg-slate-700'}`} title="Lock aspect ratio">
+                                    {aspectLocked ? <LinkIcon size={12} className="text-white" /> : <Unlink size={12} className="text-slate-400" />}
+                                </button>
+                            </div>
                         </div>
                     </div>
                 )}
@@ -460,21 +616,24 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
                 <SectionHeader id="transform" title="Transforms" />
                 {sections.transform && (
                     <div className="p-2.5 flex flex-col gap-2 bg-slate-950/50 relative z-10">
-                        <div className="grid grid-cols-2 gap-2">
-                            <div><label className="text-[10px] text-slate-500 block mb-0.5">Scale X</label>
-                                <input type="number" step="0.1" value={scaleX} onChange={e => setScaleX(e.target.value)} onBlur={() => commitPropertyChange('scaleX', scaleX)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('scaleX', scaleX)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" /></div>
-                            <div><label className="text-[10px] text-slate-500 block mb-0.5">Scale Y</label>
-                                <input type="number" step="0.1" value={scaleY} onChange={e => setScaleY(e.target.value)} onBlur={() => commitPropertyChange('scaleY', scaleY)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('scaleY', scaleY)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" /></div>
+                        <div className="flex items-center gap-2">
+                            <label className="text-[10px] text-slate-500 block mb-0.5">Scale</label>
+                            <div className="grid grid-cols-2 gap-2">
+                                <input type="number" step="0.1" value={scaleX} onChange={e => setScaleX(e.target.value)} onBlur={() => commitPropertyChange('scaleX', scaleX)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('scaleX', scaleX)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" placeholder="X" />
+                                <input type="number" step="0.1" value={scaleY} onChange={e => setScaleY(e.target.value)} onBlur={() => commitPropertyChange('scaleY', scaleY)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('scaleY', scaleY)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" placeholder="Y" />
+                            </div>
                         </div>
-                        <div className="grid grid-cols-2 gap-2">
-                            <div><label className="text-[10px] text-slate-500 block mb-0.5">Skew X (°)</label>
-                                <input type="number" value={skewX} onChange={e => setSkewX(e.target.value)} onBlur={() => commitPropertyChange('skewX', skewX)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('skewX', skewX)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" /></div>
-                            <div><label className="text-[10px] text-slate-500 block mb-0.5">Skew Y (°)</label>
-                                <input type="number" value={skewY} onChange={e => setSkewY(e.target.value)} onBlur={() => commitPropertyChange('skewY', skewY)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('skewY', skewY)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" /></div>
+                        <div className="flex items-center gap-2">
+                            <label className="text-[10px] text-slate-500 block mb-0.5">Skew</label>
+                            <div className="grid grid-cols-2 gap-2">
+                                <input type="number" step="0.1" value={skewX} onChange={e => setSkewX(e.target.value)} onBlur={() => commitPropertyChange('skewX', skewX)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('skewX', skewX)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" placeholder="X (°)" />
+                                <input type="number" step="0.1" value={skewY} onChange={e => setSkewY(e.target.value)} onBlur={() => commitPropertyChange('skewY', skewY)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('skewY', skewY)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" placeholder="Y (°)" />
+                            </div>
                         </div>
-                        <div>
-                            <label className="text-[10px] text-slate-500 block mb-0.5">Angle (°)</label>
-                            <input type="number" value={angle} onChange={e => setAngle(e.target.value)} onBlur={() => commitPropertyChange('angle', angle)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('angle', angle)} className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" />
+                        <div className="flex items-center gap-2">
+                            <label className="text-[10px] text-slate-500 w-12 shrink-0">Rotate</label>
+                            <input type="number" step="0.1" value={angle} onChange={e => setAngle(e.target.value)} onBlur={() => commitPropertyChange('angle', angle)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('angle', angle)} className="flex-1 bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500" />
+                            <span className="text-[10px] text-slate-500">deg</span>
                         </div>
                     </div>
                 )}
@@ -606,92 +765,6 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
                 )}
             </div>
 
-            {/* PATH NODES */}
-            {isNodeTool && (isPathObj || isPolygonObj) && (
-                <div className="border-b border-slate-800/60 pb-2">
-                    <SectionHeader id="path" title="Path Nodes" />
-                    {sections.path && (
-                        <div className="p-2.5 flex flex-col gap-2 mx-2 mt-2 border border-slate-800/50 rounded bg-slate-900/40">
-                            {isPathObj && (
-                                <div>
-                                    <label className="text-[10px] text-slate-500 block mb-0.5">Node Type</label>
-                                    <select value={nodeType} onChange={(e) => {
-                                        setNodeType(e.target.value);
-                                        if (selectedAnchor) {
-                                            selectedAnchor.nodeType = e.target.value as any;
-                                            const pathObj = selectedObj as fabric.Path;
-                                            pathObj.set({ path: (pathObj.path || []).slice() as any });
-                                            pathObj.setCoords();
-                                            getActiveCanvas()?.requestRenderAll();
-                                        }
-                                    }} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-[11px] text-slate-100 focus:outline-none focus:border-amber-500">
-                                        {NODE_TYPES.map(nt => <option key={nt.id} value={nt.id}>{nt.label}</option>)}
-                                    </select>
-                                </div>
-                            )}
-
-                            <div className="grid grid-cols-2 gap-2">
-                                <div><label className="text-[10px] text-slate-500 block mb-0.5">X (Node)</label>
-                                    <input type="number" value={nodeX} onChange={e => {
-                                        const v = parseFloat(e.target.value);
-                                        if (isNaN(v)) return;
-                                        setNodeX(e.target.value);
-                                        if (isPathObj && selectedAnchor) {
-                                            const pathObj = selectedObj as fabric.Path;
-                                            updatePathAnchor(pathObj, selectedAnchor, v, parseFloat(nodeY));
-                                            pathObj.set({ path: (pathObj.path || []).slice() as any });
-                                            pathObj.setCoords();
-                                            getActiveCanvas()?.requestRenderAll();
-                                        } else if (isPolygonObj && selectedNodeIndex !== null) {
-                                            const poly = selectedObj as fabric.Polygon;
-                                            const pts = [...(poly.points || [])];
-                                            pts[selectedNodeIndex] = new fabric.Point(v, parseFloat(nodeY));
-                                            poly.set({ points: pts });
-                                            poly.setCoords();
-                                            getActiveCanvas()?.requestRenderAll();
-                                        }
-                                    }} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-[11px] font-mono text-slate-100 focus:outline-none focus:border-amber-500" /></div>
-                                <div><label className="text-[10px] text-slate-500 block mb-0.5">Y (Node)</label>
-                                    <input type="number" value={nodeY} onChange={e => {
-                                        const v = parseFloat(e.target.value);
-                                        if (isNaN(v)) return;
-                                        setNodeY(e.target.value);
-                                        if (isPathObj && selectedAnchor) {
-                                            const pathObj = selectedObj as fabric.Path;
-                                            updatePathAnchor(pathObj, selectedAnchor, parseFloat(nodeX), v);
-                                            pathObj.set({ path: (pathObj.path || []).slice() as any });
-                                            pathObj.setCoords();
-                                            getActiveCanvas()?.requestRenderAll();
-                                        } else if (isPolygonObj && selectedNodeIndex !== null) {
-                                            const poly = selectedObj as fabric.Polygon;
-                                            const pts = [...(poly.points || [])];
-                                            pts[selectedNodeIndex] = new fabric.Point(parseFloat(nodeX), v);
-                                            poly.set({ points: pts });
-                                            poly.setCoords();
-                                            getActiveCanvas()?.requestRenderAll();
-                                        }
-                                    }} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-[11px] font-mono text-slate-100 focus:outline-none focus:border-amber-500" /></div>
-                            </div>
-                            
-                            <div><label className="text-[10px] text-slate-500 block mb-0.5">Corner Radius</label>
-                                <input type="number" min={0} value={cornerRadius} onChange={e => {
-                                    const v = parseFloat(e.target.value);
-                                    if (isNaN(v) || !selectedObj) return;
-                                    setCornerRadius(e.target.value);
-                                    (selectedObj as any).set({ rx: v, ry: v });
-                                    selectedObj.setCoords();
-                                    getActiveCanvas()?.requestRenderAll();
-                                }} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-[11px] font-mono text-slate-100 focus:outline-none focus:border-amber-500" /></div>
-
-                            <div className="flex items-center gap-1 flex-wrap mt-2">
-                                {(isPathObj ? pathAnchors : polygonPoints).map((_, i) => (
-                                    <button key={i} onClick={() => setSelectedNodeIndex(selectedNodeIndex === i ? null : i)} className={`w-5 h-5 rounded text-[9px] font-bold transition-all shadow-sm ${selectedNodeIndex === i ? 'bg-amber-500 text-white scale-110' : 'bg-slate-800 text-slate-500 hover:bg-slate-700'}`}>{i + 1}</button>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                </div>
-            )}
         </div>
     );
 }

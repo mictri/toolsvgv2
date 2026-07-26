@@ -7,6 +7,8 @@ export interface PathHandleRef {
     offset: number;
 }
 
+export type NodeType = 'corner' | 'smooth' | 'symmetric';
+
 export interface PathAnchorNode {
     cmdIdx: number;
     anchorOffset: number;
@@ -14,7 +16,7 @@ export interface PathAnchorNode {
     y: number;
     handleIn: { ref: PathHandleRef; x: number; y: number } | null;
     handleOut: { ref: PathHandleRef; x: number; y: number } | null;
-    nodeType: 'smooth' | 'symmetric' | 'corner';
+    nodeType: NodeType;
 }
 
 /** Convert a point in path-local coordinates to canvas coordinates */
@@ -144,6 +146,50 @@ export function updatePathHandle(
 export function rebuildPath(pathObj: fabric.Path): void {
     pathObj.set({ path: pathObj.path as any });
     pathObj.setCoords();
+}
+
+/** Change the node type and adjust handles accordingly */
+export function setNodeType(
+    pathObj: fabric.Path,
+    anchor: PathAnchorNode,
+    nodeType: NodeType,
+): void {
+    const cmds = pathObj.path as unknown as any[][];
+    anchor.nodeType = nodeType;
+
+    if (nodeType === 'corner') return;
+
+    if (nodeType === 'symmetric' && anchor.handleIn && anchor.handleOut) {
+        const dx = anchor.x - anchor.handleIn.x;
+        const dy = anchor.y - anchor.handleIn.y;
+        const nx = anchor.x + dx;
+        const ny = anchor.y + dy;
+        const hoCmd = cmds[anchor.handleOut.ref.cmdIdx];
+        hoCmd[anchor.handleOut.ref.offset] = nx;
+        hoCmd[anchor.handleOut.ref.offset + 1] = ny;
+        anchor.handleOut.x = nx;
+        anchor.handleOut.y = ny;
+        return;
+    }
+
+    if (nodeType === 'smooth' && anchor.handleIn && anchor.handleOut) {
+        const dxIn = anchor.x - anchor.handleIn.x;
+        const dyIn = anchor.y - anchor.handleIn.y;
+        const lenIn = Math.sqrt(dxIn * dxIn + dyIn * dyIn);
+        if (lenIn > 0) {
+            const dxOut = anchor.handleOut.x - anchor.x;
+            const dyOut = anchor.handleOut.y - anchor.y;
+            const lenOut = Math.sqrt(dxOut * dxOut + dyOut * dyOut);
+            const nx = anchor.x + (dxIn / lenIn) * lenOut;
+            const ny = anchor.y + (dyIn / lenIn) * lenOut;
+            const hoCmd = cmds[anchor.handleOut.ref.cmdIdx];
+            hoCmd[anchor.handleOut.ref.offset] = nx;
+            hoCmd[anchor.handleOut.ref.offset + 1] = ny;
+            anchor.handleOut.x = nx;
+            anchor.handleOut.y = ny;
+        }
+        return;
+    }
 }
 
 /** Deep-clone a Fabric path commands array */

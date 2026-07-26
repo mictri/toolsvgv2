@@ -18,7 +18,7 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
         setIsPlaying, setCurrentTime, setDuration, setLoopMode, setTimelineZoom,
         addPropertyTrack, addKeyframeToTrack, updateKeyframeInTrack,
         removeKeyframeFromTrack, setAnimatedObjectExpanded,
-        selectKeyframe, selectLayer, saveToStorage, removeAnimatedObject,
+        selectKeyframe, selectLayer, saveToStorage,
     } = useEditorStore();
 
     const LABEL_WIDTH = 256; // w-64 = 16rem = 256px
@@ -189,10 +189,10 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
     const animatedLayerIds = animatedObjects.map(ao => ao.id);
 
     return (
-        <div ref={timelineRef} className="border-t border-slate-800 bg-slate-950 px-4 py-3 flex flex-col gap-3 select-none w-full text-slate-200"
+        <div ref={timelineRef} className="border-t border-slate-800 bg-slate-950 px-4 py-3 flex flex-col gap-3 select-none w-full text-slate-200 max-h-[220px]"
             tabIndex={0} onKeyDown={handleKeyframeDelete}>
             {/* Controls Bar */}
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between shrink-0">
                 <div className="flex items-center gap-4">
                     <button onClick={handleTogglePlay}
                         className={`h-7 px-3 rounded font-bold text-xs transition-all ${isPlaying ? 'bg-amber-600 hover:bg-amber-500' : 'bg-emerald-600 hover:bg-emerald-500'}`}>
@@ -282,7 +282,7 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
             </div>
 
             {/* === TIMELINE TRACKS === */}
-            <div className="flex flex-col w-full bg-slate-900/20 rounded border border-slate-900 overflow-hidden">
+            <div className="flex flex-col w-full bg-slate-900/20 rounded border border-slate-900 overflow-y-auto min-h-0">
                 {/* Ruler Header */}
                 <div className="flex w-full border-b border-slate-900 bg-slate-950/40 text-[10px] text-slate-500 font-mono h-6 items-center">
                     <div className="w-64 px-3 font-semibold border-r border-slate-900 text-[11px] shrink-0">Animation</div>
@@ -395,7 +395,7 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                                                     title="Add keyframe at current playhead">
                                                     + Add
                                                 </button>
-                                                {/* Remove track from Timeline only */}
+                                                {/* Remove entire animation track for this object */}
                                                 <button
                                                     onMouseDown={(e) => e.stopPropagation()}
                                                     onClick={(e) => {
@@ -416,11 +416,11 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                                                             obj.setCoords();
                                                             fabricCanvas?.renderAll();
                                                         }
-                                                        removeAnimatedObject(ao.id);
+                                                        useEditorStore.getState().removeAnimatedObject(ao.id);
                                                         compileTimeline(useEditorStore.getState().animatedObjects, fabricCanvas);
                                                     }}
                                                     className="text-slate-500 hover:text-rose-400 hover:bg-slate-800/80 rounded p-1 transition-colors ml-0.5"
-                                                    title="Remove track">
+                                                    title="Remove all animation for this layer">
                                                     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
                                                 </button>
                                                 <span className="text-[9px] text-slate-600 ml-auto">{track.keyframes.length}k</span>

@@ -159,34 +159,11 @@ export async function parseSvgString(svgString: string, folderName?: string): Pr
                 const layers: Layer[] = [];
                 const resultObjects: fabric.Object[] = [];
 
-                // Compute combined bounding box of all flat objects (absolute coords)
-                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                // Set origin to center for all objects
                 flat.forEach(obj => {
                     obj.set({ originX: 'center', originY: 'center' });
                     obj.setCoords();
-                    const r = obj.getBoundingRect(true, true);
-                    if (r.left < minX) minX = r.left;
-                    if (r.top < minY) minY = r.top;
-                    if (r.left + r.width > maxX) maxX = r.left + r.width;
-                    if (r.top + r.height > maxY) maxY = r.top + r.height;
                 });
-
-                const groupW = (maxX - minX) || 1;
-                const groupH = (maxY - minY) || 1;
-                const groupCx = minX + groupW / 2;
-                const groupCy = minY + groupH / 2;
-
-                // Fixed canvas 350x350 → center at (175, 175)
-                const CANVAS_SIZE = 350;
-                const canvasCenterX = CANVAS_SIZE / 2; // 175
-                const canvasCenterY = CANVAS_SIZE / 2;
-
-                // Scale if SVG larger than 280px (80% of 350)
-                const maxAllowed = 280;
-                let fitScale = 1;
-                if (groupW > maxAllowed || groupH > maxAllowed) {
-                    fitScale = Math.min(maxAllowed / groupW, maxAllowed / groupH);
-                }
 
                 const nextName = (objType: string, originalId: string): string => {
                     if (originalId) return originalId;
@@ -195,65 +172,70 @@ export async function parseSvgString(svgString: string, folderName?: string): Pr
                     return `${label} ${typeCounters[label]}`;
                 };
 
-                // Process each flat object: center at (175,175), scale, set id
+                // Assign IDs and prepare objects
                 flat.forEach(obj => {
                     const info = layerInfoMap.get(obj);
                     const originalId = info?.originalId || '';
                     const id = crypto.randomUUID();
-                    const objType = obj.type || 'path';
-
-                    const cp = obj.getCenterPoint();
-                    const newX = canvasCenterX + (cp.x - groupCx) * fitScale;
-                    const newY = canvasCenterY + (cp.y - groupCy) * fitScale;
-
-                    obj.set({
-                        originX: 'center',
-                        originY: 'center',
-                        left: newX,
-                        top: newY,
-                        scaleX: (obj.scaleX || 1) * fitScale,
-                        scaleY: (obj.scaleY || 1) * fitScale,
-                        selectable: true,
-                        evented: true,
-                        hasControls: true,
-                        hasBorders: true,
-                        visible: true,
-                    });
-                    obj.setCoords();
-
                     (obj as any).id = id;
                     obj.set('data', { id, originalId });
-
-                    layers.push({
-                        id,
-                        name: originalId || nextName(objType, ''),
-                        type: objType === 'path' ? 'path' : 'svg',
-                        visible: true,
-                        locked: false,
-                        parentId: null,
-                        originalId,
-                        childrenIds: [],
-                    });
-
-                    resultObjects.push(obj);
+                    obj.set({ selectable: true, evented: true, hasControls: true, hasBorders: true, visible: true });
+                    obj.setCoords();
                 });
 
-                // Wrap all layers under a folder if folderName provided
-                if (folderName && layers.length > 0) {
-                    const folderId = crypto.randomUUID();
-                    const childIds = layers.map(l => l.id);
-                    layers.forEach(l => { l.parentId = folderId; });
-                    layers.unshift({
-                        id: folderId,
-                        name: folderName,
-                        type: 'group',
+                // Compute bounding box center
+                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                flat.forEach(obj => {
+                    const rect = obj.getBoundingRect(true, true);
+                    if (rect.left < minX) minX = rect.left;
+                    if (rect.top < minY) minY = rect.top;
+                    if (rect.left + rect.width > maxX) maxX = rect.left + rect.width;
+                    if (rect.top + rect.height > maxY) maxY = rect.top + rect.height;
+                });
+                const cx = (minX + maxX) / 2;
+                const cy = (minY + maxY) / 2;
+                const offsetX = 175 - cx;
+                const offsetY = 175 - cy;
+
+                // Center all objects at artboard center (175, 175)
+                flat.forEach(obj => {
+                    obj.set({
+                        left: (obj.left || 0) + offsetX,
+                        top: (obj.top || 0) + offsetY,
+                    });
+                    obj.setCoords();
+                });
+
+                // Folder layer for the imported SVG
+                const folderId = crypto.randomUUID();
+                const childIds = flat.map(o => (o as any).id as string);
+                layers.push({
+                    id: folderId,
+                    name: folderName || 'Imported SVG',
+                    type: 'group',
+                    visible: true,
+                    locked: false,
+                    parentId: null,
+                    originalId: '',
+                    childrenIds: childIds,
+                });
+                // Sub-layers for each child
+                childIds.forEach((cid, i) => {
+                    const obj = flat[i];
+                    const info = layerInfoMap.get(obj);
+                    layers.push({
+                        id: cid,
+                        name: (info?.originalId) || nextName(obj.type || 'svg', ''),
+                        type: obj.type === 'path' ? 'path' : 'svg',
                         visible: true,
                         locked: false,
-                        parentId: null,
-                        originalId: '',
-                        childrenIds: childIds,
+                        parentId: folderId,
+                        originalId: info?.originalId || '',
+                        childrenIds: [],
                     });
-                }
+                });
+
+                resultObjects.push(...flat);
 
                 resolve({ objects: resultObjects, layers, svgWidth, svgHeight });
             } catch (err) {

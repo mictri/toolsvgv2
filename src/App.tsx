@@ -51,8 +51,14 @@ export default function App() {
             canvas.calcOffset();
             canvas.renderAll();
 
-            // Ghi đè Layers vào Store
             useEditorStore.getState().setLayers(newLayers);
+
+            // Select first imported object
+            if (objects[0]) {
+                canvas.setActiveObject(objects[0]);
+                useEditorStore.getState().setSelectedObjectIds([(objects[0] as any).id]);
+            }
+            useEditorStore.getState().setTool('transform');
         } catch (err) {
             console.error('Import SVG failed:', err);
             alert('Failed to import SVG. Make sure the file is a valid SVG.');

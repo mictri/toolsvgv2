@@ -200,49 +200,28 @@ export default function LayersPanel({ fabricCanvasRef }: LayersPanelProps) {
 
     const rootLayers = layers.filter(l => l.parentId === null);
 
-    const handleSelect = (id: string) => {
-        const canvas = fabricCanvasRef.current;
-        selectLayer(id);
+const handleSelect = (id: string) => {
+    const canvas = fabricCanvasRef.current;
+    selectLayer(id);
+    if (!canvas) return;
 
-        if (!canvas) return;
-
-        const collectChildObjects = (parentId: string, acc: fabric.Object[]) => {
-            const parent = layers.find(l => l.id === parentId);
-            if (!parent) return;
-            if (parent.type === 'group') {
-                parent.childrenIds.forEach(cid => collectChildObjects(cid, acc));
-            } else {
-                const obj = findObjectById(canvas, parentId);
-                if (obj) acc.push(obj);
-            }
-        };
-
-        if (id === ROOT_LAYER_ID) {
+    if (id === ROOT_LAYER_ID) {
+        canvas.discardActiveObject();
+    } else {
+        const obj = findObjectById(canvas, id);
+        if (obj) {
             canvas.discardActiveObject();
-        } else {
-            const layer = layers.find(l => l.id === id);
-            if (layer?.type === 'group' && layer.childrenIds.length > 0) {
-                const childObjects: fabric.Object[] = [];
-                collectChildObjects(id, childObjects);
-                if (childObjects.length > 0) {
-                    canvas.discardActiveObject();
-                    const sel = new fabric.ActiveSelection(childObjects, { canvas });
-                    canvas.setActiveObject(sel);
-                } else {
-                    canvas.discardActiveObject();
-                }
-            } else {
-                const obj = findObjectById(canvas, id);
-                if (obj) {
-                    canvas.discardActiveObject();
-                    canvas.setActiveObject(obj);
-                } else {
-                    canvas.discardActiveObject();
-                }
+            // Nếu là đối tượng nằm trong Group, cần active thông qua parent group hoặc set active target
+            if (obj.group) {
+                (obj.group as any).subTargetCheck = true;
             }
+            canvas.setActiveObject(obj);
+        } else {
+            canvas.discardActiveObject();
         }
-        canvas.requestRenderAll();
-    };
+    }
+    canvas.requestRenderAll();
+};
 
     const handleToggleVisibility = (id: string) => {
         toggleLayerVisibility(id);

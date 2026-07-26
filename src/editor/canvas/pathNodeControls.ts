@@ -1,5 +1,5 @@
 import { fabric } from 'fabric';
-import { pathLocalToCanvas, pathCanvasToLocal, updatePathAnchor, updatePathHandle } from './pathNodeEditor';
+import { pathCanvasToLocal, updatePathAnchor, updatePathHandle } from './pathNodeEditor';
 import type { PathAnchorNode } from './pathNodeEditor';
 
 interface SavedState {
@@ -8,6 +8,34 @@ interface SavedState {
 }
 
 const savedStates = new WeakMap<fabric.Object, SavedState>();
+
+// Screen-space constants (CSS pixels) — invariant under zoom / object scale
+const SCREEN_ANCHOR_RADIUS = 6;
+const SCREEN_HANDLE_RADIUS = 4;
+const SCREEN_ANCHOR_STROKE = 2;
+const SCREEN_HANDLE_STROKE = 1;
+const SCREEN_LINE_STROKE = 1.5;
+const SCREEN_HELPER_STROKE = 1;
+const SCREEN_DASH_LEN = 3;
+
+/**
+ * Compute screen-space position from path-local coordinates by applying
+ * the path object's full transform matrix then the canvas viewport transform.
+ */
+function anchorToScreen(obj: fabric.Object, localPt: { x: number; y: number }): fabric.Point {
+    const pathObj = obj as fabric.Path;
+    const matrix = pathObj.calcTransformMatrix();
+    const off = pathObj.pathOffset || { x: 0, y: 0 };
+    const canvasPt = fabric.util.transformPoint(
+        new fabric.Point(localPt.x - off.x, localPt.y - off.y),
+        matrix,
+    );
+    const vpt = pathObj.canvas?.viewportTransform;
+    if (vpt) {
+        return fabric.util.transformPoint(canvasPt, vpt) as fabric.Point;
+    }
+    return canvasPt as fabric.Point;
+}
 
 /**
  * Replace the standard selection controls on a fabric.Path with custom
@@ -36,8 +64,7 @@ export function setupPathNodeControls(
         controls[`anchor_${ai}`] = new fabric.Control({
             x: 0, y: 0,
             positionHandler(_dim: fabric.Point, _finalMatrix: number[], obj: fabric.Object) {
-                const p = pathLocalToCanvas(obj as fabric.Path, { x: anchor.x, y: anchor.y });
-                return new fabric.Point(p.x, p.y);
+                return anchorToScreen(obj, { x: anchor.x, y: anchor.y });
             },
             actionHandler(_eventData: MouseEvent, transform: any, x: number, y: number) {
                 const pathObj = transform.target as fabric.Path;
@@ -54,12 +81,12 @@ export function setupPathNodeControls(
                 (pathObj.canvas as fabric.Canvas)?.requestRenderAll();
                 return true;
             },
-            render(ctx: CanvasRenderingContext2D, left: number, top: number) {
+            render(ctx: CanvasRenderingContext2D, left: number, top: number, _styleOverride: any, _fabricObj: fabric.Object) {
                 ctx.fillStyle = '#fff';
                 ctx.strokeStyle = '#818cf8';
-                ctx.lineWidth = 2;
+                ctx.lineWidth = SCREEN_ANCHOR_STROKE;
                 ctx.beginPath();
-                ctx.arc(left, top, 4, 0, Math.PI * 2);
+                ctx.arc(left, top, SCREEN_ANCHOR_RADIUS, 0, Math.PI * 2);
                 ctx.fill();
                 ctx.stroke();
             },
@@ -72,8 +99,7 @@ export function setupPathNodeControls(
             controls[`handleOut_${ai}`] = new fabric.Control({
                 x: 0, y: 0,
                 positionHandler(_dim: fabric.Point, _finalMatrix: number[], obj: fabric.Object) {
-                    const p = pathLocalToCanvas(obj as fabric.Path, { x: hRef.x, y: hRef.y });
-                    return new fabric.Point(p.x, p.y);
+                    return anchorToScreen(obj, { x: hRef.x, y: hRef.y });
                 },
                 actionHandler(_eventData: MouseEvent, transform: any, x: number, y: number) {
                     const pathObj = transform.target as fabric.Path;
@@ -89,12 +115,12 @@ export function setupPathNodeControls(
                     (pathObj.canvas as fabric.Canvas)?.requestRenderAll();
                     return true;
                 },
-                render(ctx: CanvasRenderingContext2D, left: number, top: number) {
+                render(ctx: CanvasRenderingContext2D, left: number, top: number, _styleOverride: any, _fabricObj: fabric.Object) {
                     ctx.fillStyle = '#60a5fa';
                     ctx.strokeStyle = '#fff';
-                    ctx.lineWidth = 1;
+                    ctx.lineWidth = SCREEN_HANDLE_STROKE;
                     ctx.beginPath();
-                    ctx.arc(left, top, 3, 0, Math.PI * 2);
+                    ctx.arc(left, top, SCREEN_HANDLE_RADIUS, 0, Math.PI * 2);
                     ctx.fill();
                     ctx.stroke();
                 },
@@ -108,8 +134,7 @@ export function setupPathNodeControls(
             controls[`handleIn_${ai}`] = new fabric.Control({
                 x: 0, y: 0,
                 positionHandler(_dim: fabric.Point, _finalMatrix: number[], obj: fabric.Object) {
-                    const p = pathLocalToCanvas(obj as fabric.Path, { x: hRef.x, y: hRef.y });
-                    return new fabric.Point(p.x, p.y);
+                    return anchorToScreen(obj, { x: hRef.x, y: hRef.y });
                 },
                 actionHandler(_eventData: MouseEvent, transform: any, x: number, y: number) {
                     const pathObj = transform.target as fabric.Path;
@@ -125,12 +150,12 @@ export function setupPathNodeControls(
                     (pathObj.canvas as fabric.Canvas)?.requestRenderAll();
                     return true;
                 },
-                render(ctx: CanvasRenderingContext2D, left: number, top: number) {
+                render(ctx: CanvasRenderingContext2D, left: number, top: number, _styleOverride: any, _fabricObj: fabric.Object) {
                     ctx.fillStyle = '#60a5fa';
                     ctx.strokeStyle = '#fff';
-                    ctx.lineWidth = 1;
+                    ctx.lineWidth = SCREEN_HANDLE_STROKE;
                     ctx.beginPath();
-                    ctx.arc(left, top, 3, 0, Math.PI * 2);
+                    ctx.arc(left, top, SCREEN_HANDLE_RADIUS, 0, Math.PI * 2);
                     ctx.fill();
                     ctx.stroke();
                 },
@@ -142,12 +167,11 @@ export function setupPathNodeControls(
 
     pathObj.controls = controls;
 
-    // Override drawControls to draw helper lines + controls
+    // Override drawControls to draw helper lines in screen space
     (pathObj as any).drawControls = function (this: fabric.Object, ctx: CanvasRenderingContext2D, styleOverride?: any) {
         styleOverride = styleOverride || {};
         ctx.save();
-        const canvas = this.canvas;
-        const retinaScaling = canvas ? (canvas as any).getRetinaScaling() : 1;
+        var retinaScaling = this.canvas ? (this.canvas as any).getRetinaScaling() : 1;
         ctx.setTransform(retinaScaling, 0, 0, retinaScaling, 0, 0);
         ctx.lineCap = 'round';
 
@@ -156,7 +180,7 @@ export function setupPathNodeControls(
             const n = anchors.length;
 
             ctx.strokeStyle = 'rgba(129,140,248,0.3)';
-            ctx.lineWidth = 1.5;
+            ctx.lineWidth = SCREEN_LINE_STROKE;
             ctx.setLineDash([]);
             ctx.beginPath();
             for (let ai = 0; ai < n; ai++) {
@@ -169,8 +193,8 @@ export function setupPathNodeControls(
             ctx.stroke();
 
             ctx.strokeStyle = '#60a5fa';
-            ctx.lineWidth = 1;
-            ctx.setLineDash([3, 3]);
+            ctx.lineWidth = SCREEN_HELPER_STROKE;
+            ctx.setLineDash([SCREEN_DASH_LEN, SCREEN_DASH_LEN]);
             for (let ai = 0; ai < n; ai++) {
                 const anchorPt = oCoords[`anchor_${ai}`];
                 if (!anchorPt) continue;

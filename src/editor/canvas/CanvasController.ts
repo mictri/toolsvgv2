@@ -1,134 +1,264 @@
-/**
- * CanvasController — Business logic cho Fabric Canvas.
- * Chịu trách nhiệm thêm/xóa/chọn/sắp xếp object trên canvas.
- * Tách logic khỏi UI component Canvas.tsx để dễ maintain.
- */
 import { fabric } from 'fabric';
-import { Layer } from '../../store/editorStore';
 
 export interface CanvasControllerOptions {
-    /** Kích thước canvas mặc định */
-    width?: number;
-    height?: number;
+    containerWidth: number;
+    containerHeight: number;
     backgroundColor?: string;
 }
 
+export type ZoomChangeCallback = (zoom: number) => void;
+
 export class CanvasController {
     private canvas: fabric.Canvas | null = null;
+    private artboardRect: fabric.Rect | null = null;
+    private _zoom = 1;
+    private onZoomChange: ZoomChangeCallback | null = null;
+    private isSpaceDown = false;
+    private handToolActive = false;
+    private panState = { isPanning: false, startX: 0, startY: 0, tx: 0, ty: 0 };
+    private boundHandlers: { [key: string]: (...args: any[]) => void } = {};
 
-    init(canvasEl: HTMLCanvasElement, options?: CanvasControllerOptions) {
+    static readonly ARTBOARD_WIDTH = 350;
+    static readonly ARTBOARD_HEIGHT = 350;
+    static readonly MIN_ZOOM = 0.1;
+    static readonly MAX_ZOOM = 50;
+    static readonly BASE_CORNER_SIZE = 8;
+    static readonly BASE_TOUCH_SIZE = 12;
+    static readonly BASE_ROTATING_OFFSET = 30;
+
+    setZoomChangeCallback(cb: ZoomChangeCallback | null) {
+        this.onZoomChange = cb;
+    }
+
+    init(canvasEl: HTMLCanvasElement, options: CanvasControllerOptions) {
         this.canvas = new fabric.Canvas(canvasEl, {
-            width: options?.width || 400,
-            height: options?.height || 400,
-            backgroundColor: options?.backgroundColor || '#FFFFFF',
+            width: options.containerWidth,
+            height: options.containerHeight,
+            backgroundColor: options.backgroundColor || '#0f172a',
             preserveObjectStacking: true,
-            selection: true, // Cho phép kéo chọn đa đối tượng
+            enableRetinaScaling: true,
+            renderOnAddRemove: true,
+            selection: true,
         });
+
+        this.setupArtboard();
+        this.centerArtboard();
+        this.bindViewportEvents();
+        this.bindGlobalKeyEvents();
 
         return this.canvas;
     }
 
     dispose() {
+        this.unbindGlobalKeyEvents();
         this.canvas?.dispose();
         this.canvas = null;
+        this.artboardRect = null;
     }
 
-    /**
-     * Nạp danh sách objects từ SVG import vào Canvas
-     */
-    loadSvgObjects(objects: fabric.Object[]) {
+    private setupArtboard() {
         if (!this.canvas) return;
-
-        // Xóa sạch các object cũ trên Canvas
-        this.canvas.clear();
-
-        // Đặt nền canvas
-        this.canvas.setBackgroundColor('#FFFFFF', () => {});
-
-        // Thêm trực tiếp từng object con độc lập
-        objects.forEach((obj) => {
-            // Cho phép chọn và điều khiển từng path rời
-            obj.set({
-                selectable: true,
-                evented: true,
-                hasControls: true,
-                hasBorders: true,
-            });
-
-            this.canvas?.add(obj);
-            // Tính lại Bounding Box chính xác cho từng object
-            obj.setCoords();
+        const rect = new fabric.Rect({
+            left: 0,
+            top: 0,
+            width: CanvasController.ARTBOARD_WIDTH,
+            height: CanvasController.ARTBOARD_HEIGHT,
+            fill: '#FFFFFF',
+            selectable: false,
+            evented: false,
         });
-
-        this.canvas.discardActiveObject();
-        this.canvas.renderAll();
+        this.canvas.add(rect);
+        this.canvas.sendToBack(rect);
+        this.artboardRect = rect;
     }
 
-    addShape(_layer: Layer, fabricObj: fabric.Object) {
+    centerArtboard() {
+        if (!this.canvas || !this.artboardRect) return;
+        const cw = this.artboardRect.width || CanvasController.ARTBOARD_WIDTH;
+        const ch = this.artboardRect.height || CanvasController.ARTBOARD_HEIGHT;
+        const containerWidth = this.canvas.getWidth();
+        const containerHeight = this.canvas.getHeight();
+        const zoom = 1;
+        this._zoom = zoom;
+        const vpt = this.canvas.viewportTransform;
+        if (!vpt) return;
+        vpt[0] = zoom;
+        vpt[3] = zoom;
+        vpt[4] = (containerWidth - cw * zoom) / 2;
+        vpt[5] = (containerHeight - ch * zoom) / 2;
+        this.canvas.setViewportTransform(vpt);
+        this.canvas.requestRenderAll();
+        this.onZoomChange?.(zoom);
+    }
+
+    updateArtboardSize(width: number, height: number) {
+        if (!this.canvas || !this.artboardRect) return;
+        this.artboardRect.set({ width, height });
+        this.canvas.renderAll();
+        this.centerArtboard();
+    }
+
+    private updateControlsScale() {
         if (!this.canvas) return;
-        
-        fabricObj.set({
-            selectable: true,
-            evented: true,
-            hasControls: true,
-            hasBorders: true,
+        const zoom = this.canvas.getZoom();
+        this.canvas.forEachObject((obj) => {
+            if (obj === this.artboardRect) return;
+            obj.cornerSize = CanvasController.BASE_CORNER_SIZE / zoom;
+            (obj as any).touchCornerSize = CanvasController.BASE_TOUCH_SIZE / zoom;
+            obj.rotatingPointOffset = CanvasController.BASE_ROTATING_OFFSET / zoom;
         });
-
-        this.canvas.add(fabricObj);
-        fabricObj.setCoords();
-        this.canvas.setActiveObject(fabricObj);
-        this.canvas.renderAll();
     }
 
-    removeObjectById(id: string) {
-        if (!this.canvas) return;
-        const obj = this.findObjectById(id);
-        if (obj) {
-            this.canvas.remove(obj);
-            this.canvas.discardActiveObject();
-            this.canvas.renderAll();
-        }
-    }
-
-    /**
-     * Chọn object theo ID và cập nhật Bounding Box ôm khít lấy hình
-     */
-    selectObjectById(id: string | null) {
+    private bindViewportEvents() {
         if (!this.canvas) return;
 
-        if (!id) {
-            this.canvas.discardActiveObject();
-            this.canvas.renderAll();
-            return;
-        }
+        this.boundHandlers.wheel = (opt: fabric.IEvent) => {
+            const evt = opt.e as WheelEvent;
+            evt.preventDefault();
+            const delta = evt.deltaY > 0 ? 0.92 : 1.08;
+            const currentZoom = this.canvas!.getZoom();
+            let newZoom = currentZoom * delta;
+            newZoom = Math.min(CanvasController.MAX_ZOOM, Math.max(CanvasController.MIN_ZOOM, newZoom));
+            this._zoom = newZoom;
+            this.canvas!.zoomToPoint(new fabric.Point(evt.offsetX, evt.offsetY), newZoom);
+            this.updateControlsScale();
+            this.canvas!.requestRenderAll();
+            this.onZoomChange?.(newZoom);
+        };
 
-        const obj = this.findObjectById(id);
-        if (obj) {
-            // Ép Fabric tính lại tọa độ khung điều khiển trước khi hiển thị
-            obj.setCoords();
-            this.canvas.setActiveObject(obj);
-            this.canvas.renderAll();
-        } else {
-            this.canvas.discardActiveObject();
-            this.canvas.renderAll();
+        this.boundHandlers.mouseDown = (opt: fabric.IEvent) => {
+            const evt = opt.e as MouseEvent;
+            const isMiddle = evt.button === 1;
+            if (this.isSpaceDown || isMiddle || this.handToolActive) {
+                if (isMiddle) evt.preventDefault();
+                this.panState.isPanning = true;
+                this.panState.startX = evt.clientX;
+                this.panState.startY = evt.clientY;
+                const vpt = this.canvas!.viewportTransform;
+                if (vpt) { this.panState.tx = vpt[4]; this.panState.ty = vpt[5]; }
+                this.canvas!.defaultCursor = 'grabbing';
+                this.canvas!.selection = false;
+            }
+        };
+
+        this.boundHandlers.mouseMove = (opt: fabric.IEvent) => {
+            if (!this.panState.isPanning) return;
+            const evt = opt.e as MouseEvent;
+            const vpt = this.canvas!.viewportTransform;
+            if (!vpt) return;
+            vpt[4] = this.panState.tx + (evt.clientX - this.panState.startX);
+            vpt[5] = this.panState.ty + (evt.clientY - this.panState.startY);
+            this.canvas!.requestRenderAll();
+        };
+
+        this.boundHandlers.mouseUp = () => {
+            this.panState.isPanning = false;
+            this.canvas!.defaultCursor = this.isSpaceDown || this.handToolActive ? 'grab' : 'default';
+            if (!this.isSpaceDown && !this.handToolActive) this.canvas!.selection = true;
+        };
+
+        this.canvas.on('mouse:wheel', this.boundHandlers.wheel);
+        this.canvas.on('mouse:down', this.boundHandlers.mouseDown);
+        this.canvas.on('mouse:move', this.boundHandlers.mouseMove);
+        this.canvas.on('mouse:up', this.boundHandlers.mouseUp);
+    }
+
+    private bindGlobalKeyEvents() {
+        this.boundHandlers.globalKeyDown = (e: KeyboardEvent) => {
+            if (e.key === ' ' && e.target instanceof HTMLElement && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+                e.preventDefault();
+                this.isSpaceDown = true;
+                if (this.canvas) {
+                    this.canvas.defaultCursor = 'grab';
+                    this.canvas.selection = false;
+                    this.canvas.renderAll();
+                }
+            }
+        };
+        this.boundHandlers.globalKeyUp = (e: KeyboardEvent) => {
+            if (e.key === ' ') {
+                this.isSpaceDown = false;
+                this.panState.isPanning = false;
+                if (this.canvas) {
+                    this.canvas.defaultCursor = this.handToolActive ? 'grab' : 'default';
+                    this.canvas.selection = !this.handToolActive;
+                    this.canvas.renderAll();
+                }
+            }
+        };
+        window.addEventListener('keydown', this.boundHandlers.globalKeyDown);
+        window.addEventListener('keyup', this.boundHandlers.globalKeyUp);
+    }
+
+    private unbindGlobalKeyEvents() {
+        if (this.boundHandlers.globalKeyDown) {
+            window.removeEventListener('keydown', this.boundHandlers.globalKeyDown);
+        }
+        if (this.boundHandlers.globalKeyUp) {
+            window.removeEventListener('keyup', this.boundHandlers.globalKeyUp);
         }
     }
 
-    /**
-     * Tìm object trên Canvas dựa trên ID (kiểm tra cả obj.id lẫn obj.data.id)
-     */
-    private findObjectById(id: string): fabric.Object | null {
-        if (!this.canvas) return null;
-        
-        const objects = this.canvas.getObjects();
-        for (const obj of objects) {
-            const objId = (obj as any).id || (obj.data as any)?.id;
-            if (objId === id) return obj;
-        }
-        return null;
+    setHandToolActive(active: boolean) {
+        this.handToolActive = active;
     }
 
-    getCanvas() {
+    // === PUBLIC API ===
+
+    getZoom(): number {
+        return Math.round(this._zoom * 100);
+    }
+
+    getRawZoom(): number {
+        return this._zoom;
+    }
+
+    zoomIn() {
+        if (!this.canvas) return;
+        const center = new fabric.Point(
+            this.canvas.getWidth() / 2,
+            this.canvas.getHeight() / 2
+        );
+        let newZoom = this._zoom * 1.2;
+        newZoom = Math.min(CanvasController.MAX_ZOOM, Math.max(CanvasController.MIN_ZOOM, newZoom));
+        this._zoom = newZoom;
+        this.canvas.zoomToPoint(center, newZoom);
+        this.updateControlsScale();
+        this.canvas.requestRenderAll();
+        this.onZoomChange?.(newZoom);
+    }
+
+    zoomOut() {
+        if (!this.canvas) return;
+        const center = new fabric.Point(
+            this.canvas.getWidth() / 2,
+            this.canvas.getHeight() / 2
+        );
+        let newZoom = this._zoom / 1.2;
+        newZoom = Math.min(CanvasController.MAX_ZOOM, Math.max(CanvasController.MIN_ZOOM, newZoom));
+        this._zoom = newZoom;
+        this.canvas.zoomToPoint(center, newZoom);
+        this.updateControlsScale();
+        this.canvas.requestRenderAll();
+        this.onZoomChange?.(newZoom);
+    }
+
+    resetZoom() {
+        this.centerArtboard();
+    }
+
+    resize(width: number, height: number) {
+        if (!this.canvas) return;
+        this.canvas.setWidth(width);
+        this.canvas.setHeight(height);
+        this.centerArtboard();
+    }
+
+    getCanvas(): fabric.Canvas | null {
         return this.canvas;
+    }
+
+    getArtboardRect(): fabric.Rect | null {
+        return this.artboardRect;
     }
 }
