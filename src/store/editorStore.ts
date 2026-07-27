@@ -339,7 +339,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
     // ===== ANIMATION ACTIONS =====
     setIsPlaying: (isPlaying) => set({ isPlaying }),
-    setCurrentTime: (currentTime) => set({ currentTime }),
+    setCurrentTime: (currentTime) => {
+        const prev = get().currentTime;
+        if (prev !== currentTime) set({ currentTime });
+    },
     setDuration: (duration) => set({ duration }),
     setLoopMode: (loopMode) => set({ loopMode }),
     setTimelineZoom: (timelineZoom) => set({ timelineZoom: Math.max(20, Math.min(500, timelineZoom)) }),

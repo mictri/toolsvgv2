@@ -192,9 +192,10 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
     const [fill, setFill] = useState('#6366f1');
     const [stroke, setStroke] = useState('');
     const [strokeWidth, setStrokeWidth] = useState<string>('1');
-    const [strokeDashArray, setStrokeDashArray] = useState<string>('0');
+    const [strokeDashArray, setStrokeDashArray] = useState<number>(0);
     const [strokeDashOffset, setStrokeDashOffset] = useState<string>('0');
     const [pathLength, setPathLength] = useState<string>('0');
+    const [morphPathData, setMorphPathData] = useState<string>('');
     const [opacity, setOpacity] = useState<string>('1');
 
     const [nodeX, setNodeX] = useState<string>('0');
@@ -353,9 +354,19 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
             setStroke(targetObj.stroke || '');
             setStrokeWidth(String(targetObj.strokeWidth || 1));
             const dashes = targetObj.strokeDashArray;
-            setStrokeDashArray(Array.isArray(dashes) && dashes.length > 0 ? dashes.join(', ') : '0');
+            setStrokeDashArray(Array.isArray(dashes) && dashes.length > 0 && dashes[0] > 0 ? dashes[0] : 0);
             setStrokeDashOffset(String(targetObj.strokeDashOffset || 0));
             setPathLength(Number(calculatePathLength(targetObj)).toFixed(1));
+            if (targetObj instanceof fabric.Path) {
+                const pathArr = (targetObj as fabric.Path).path;
+                if (Array.isArray(pathArr) && pathArr.length > 0) {
+                    setMorphPathData(pathArr.map((cmd: any) => (Array.isArray(cmd) ? cmd.join(' ') : String(cmd))).join(' '));
+                } else {
+                    setMorphPathData('');
+                }
+            } else {
+                setMorphPathData('');
+            }
             updateNodeWorldPosRef.current();
         };
         const scheduleUpdate = () => {
@@ -393,8 +404,8 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
         if (['fill', 'stroke'].includes(property)) {
             finalValue = rawValue;
         } else if (property === 'strokeDashArray') {
-            const arr = rawValue.split(',').map(n => parseFloat(n.trim())).filter(n => !isNaN(n));
-            finalValue = arr.length > 0 ? arr : undefined;
+            const val = Math.max(0, parseFloat(rawValue) || 0);
+            finalValue = val > 0 ? [val, val] as any : null;
         } else if (isNaN(numVal)) return;
 
         selectedObj.set(property as any, finalValue);
@@ -409,6 +420,8 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
             trackValue = { scaleX: selectedObj.scaleX, scaleY: selectedObj.scaleY };
         } else if (property === 'skewX' || property === 'skewY') {
             trackValue = { skewX: selectedObj.skewX, skewY: selectedObj.skewY };
+        } else if (property === 'strokeDashArray') {
+            trackValue = parseFloat(rawValue) || 0;
         } else {
             trackValue = finalValue;
         }
@@ -761,7 +774,7 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
                         {/* Hàng 4: Dashes & Offset */}
                         <div className="grid grid-cols-2 gap-2 mt-1 relative z-10">
                             <div><label className="text-[9px] font-bold text-slate-500 uppercase block mb-0.5 tracking-wider">Dasharray</label>
-                                <input type="text" value={strokeDashArray} onChange={e => setStrokeDashArray(e.target.value)} onBlur={() => commitPropertyChange('strokeDashArray', strokeDashArray)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('strokeDashArray', strokeDashArray)} placeholder="0" className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1.5 text-[11px] font-mono text-slate-200 focus:outline-none focus:border-indigo-500 transition-colors" /></div>
+                                <input type="number" min="0" step="0.1" value={strokeDashArray} onChange={e => setStrokeDashArray(e.target.value === '' ? 0 : Number(e.target.value))} onBlur={() => commitPropertyChange('strokeDashArray', String(strokeDashArray))} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('strokeDashArray', String(strokeDashArray))} placeholder="0" className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1.5 text-[11px] font-mono text-slate-200 focus:outline-none focus:border-indigo-500 transition-colors" /></div>
                             <div><label className="text-[9px] font-bold text-slate-500 uppercase block mb-0.5 tracking-wider">Dashoffset</label>
                                 <input type="number" value={strokeDashOffset} onChange={e => setStrokeDashOffset(e.target.value)} onBlur={() => commitPropertyChange('strokeDashOffset', strokeDashOffset)} onKeyDown={e => e.key === 'Enter' && commitPropertyChange('strokeDashOffset', strokeDashOffset)} placeholder="0" className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1.5 text-[11px] font-mono text-slate-200 focus:outline-none focus:border-indigo-500 transition-colors" /></div>
                         </div>
@@ -780,8 +793,8 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
                                     <div className="absolute right-0 bottom-full mb-1 z-50 w-36 bg-slate-900 border border-slate-700 rounded shadow-xl overflow-hidden py-1">
                                         <button onClick={() => {
                                             const len = parseFloat(pathLength);
-                                            setStrokeDashArray(`${len}, ${len}`);
-                                            commitPropertyChange('strokeDashArray', `${len}, ${len}`);
+                                            setStrokeDashArray(len);
+                                            commitPropertyChange('strokeDashArray', String(len));
                                             setPopover(null);
                                         }} className="w-full text-left px-3 py-2 text-[10px] text-slate-300 hover:bg-indigo-600 hover:text-white transition-colors">Copy to Dasharray</button>
                                         
@@ -795,6 +808,16 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
                                 )}
                             </div>
                         </div>
+
+                        {/* Hàng 5b: Morph Path Data (read-only, chỉ hiện với Path objects) */}
+                        {isPathObj && morphPathData && (
+                            <div className="mt-1 relative z-10">
+                                <label className="text-[9px] font-bold text-purple-500/80 uppercase block mb-0.5 pl-0.5 tracking-wider">Morph Path Data</label>
+                                <div className="w-full bg-slate-950 border border-slate-800/50 rounded px-2 py-1.5 text-[10px] font-mono text-purple-300/70 truncate cursor-default select-all" title={morphPathData}>
+                                    {morphPathData.length > 80 ? morphPathData.slice(0, 80) + '...' : morphPathData}
+                                </div>
+                            </div>
+                        )}
 
                         {/* Hàng 6: Opacity */}
                         <div className="mt-2 flex gap-2 items-center bg-slate-900/40 p-2 rounded relative z-10 border border-slate-800/30">

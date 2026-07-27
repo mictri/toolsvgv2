@@ -3,6 +3,7 @@ import Canvas from './editor/canvas/Canvas';
 import Timeline from './editor/timeline/Timeline';
 import RightSidebar from './editor/sidebar/RightSidebar';
 import LayersPanel from './editor/layers/LayersPanel';
+import ExportModal from './editor/export/ExportModal';
 import { useEditorStore } from './store/editorStore';
 import { fabric } from 'fabric';
 import { parseSvgString, readSvgFile } from './services/svgParser';
@@ -15,6 +16,7 @@ export default function App() {
     const fabricCanvasRef = useRef<fabric.Canvas | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [showExportMenu, setShowExportMenu] = useState(false);
+    const [showExportModal, setShowExportModal] = useState(false);
     const exportMenuRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => { loadFromStorage(); }, []);
@@ -40,7 +42,7 @@ export default function App() {
             if (!objects || objects.length === 0) return;
 
             canvas.clear();
-            canvas.setBackgroundColor('#FFFFFF', () => {});
+            canvas.setBackgroundColor('#000000', () => {});
 
             objects.forEach(obj => {
                 canvas.add(obj);
@@ -88,12 +90,17 @@ export default function App() {
         setShowExportMenu(false);
     };
 
+    const handleExportAnimation = () => {
+        setShowExportMenu(false);
+        setShowExportModal(true);
+    };
+
     return (
         <div className="flex h-screen flex-col bg-slate-900 text-slate-100 font-sans">
             {/* Top Header Bar */}
             <header className="flex h-14 shrink-0 items-center justify-between border-b border-slate-800 bg-slate-950/50 px-6 backdrop-blur-md">
                 <div className="flex items-center gap-3">
-                    <span className="text-xl font-bold tracking-wider text-indigo-400">⚡ PRO SVG ANIMATOR</span>
+                    <span className="text-xl font-bold tracking-wider text-indigo-400">⚡ PRO FCV ANIMATOR</span>
                     <span className="rounded-full bg-indigo-500/10 px-2 py-0.5 text-xs font-medium text-indigo-400 border border-indigo-500/20">Studio v1.0</span>
                 </div>
                 <div className="flex items-center gap-3">
@@ -108,7 +115,7 @@ export default function App() {
                             ⬇ Export
                         </button>
                         {showExportMenu && (
-                            <div className="absolute right-0 mt-2 w-44 rounded-lg bg-slate-900 border border-slate-800 shadow-xl z-[999] p-1.5 flex flex-col gap-1">
+                            <div className="absolute right-0 mt-2 w-52 rounded-lg bg-slate-900 border border-slate-800 shadow-xl z-[999] p-1.5 flex flex-col gap-1">
                                 <button onClick={handleExportSvg}
                                     className="flex items-center gap-2 w-full text-left px-3 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white rounded-md transition-colors">
                                     <span>🖼️</span><span>Export SVG</span>
@@ -116,6 +123,11 @@ export default function App() {
                                 <button onClick={handleExportJson}
                                     className="flex items-center gap-2 w-full text-left px-3 py-2 text-xs font-medium text-slate-300 hover:bg-slate-800 hover:text-white rounded-md transition-colors">
                                     <span>📄</span><span>Export JSON (Project)</span>
+                                </button>
+                                <div className="h-px bg-slate-800 mx-2" />
+                                <button onClick={handleExportAnimation}
+                                    className="flex items-center gap-2 w-full text-left px-3 py-2 text-xs font-medium text-emerald-400 hover:bg-slate-800 hover:text-emerald-300 rounded-md transition-colors">
+                                    <span>🎬</span><span>Export Animation (HTML)</span>
                                 </button>
                             </div>
                         )}
@@ -139,6 +151,13 @@ export default function App() {
                 <RightSidebar fabricCanvas={canvasInstance} />
             </div>
             <Timeline fabricCanvas={canvasInstance} />
+            {showExportModal && (
+                <ExportModal
+                    fabricCanvas={canvasInstance}
+                    animatedObjects={useEditorStore.getState().animatedObjects}
+                    onClose={() => setShowExportModal(false)}
+                />
+            )}
         </div>
     );
 }
