@@ -213,6 +213,7 @@ interface EditorState {
     toggleLayerVisibility: (id: string) => void;
     updateLayerName: (layerId: string, newName: string) => void;
     reorderLayers: (fromIndex: number, toIndex: number) => void;
+    reorderFolder: (movedLayerId: string, targetLayerId: string | null, position: 'before' | 'after') => void;
     setLayers: (layers: Layer[]) => void;
     updateCanvasConfig: (config: Partial<CanvasConfig>) => void;
     setIsCanvasInitialized: (initialized: boolean) => void;
@@ -576,6 +577,40 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         const [moved] = flat.splice(fromIndex, 1);
         flat.splice(toIndex, 0, moved);
         return { layers: flat };
+    }),
+
+    reorderFolder: (movedLayerId: string, targetLayerId: string | null, position: 'before' | 'after') => set((s) => {
+        // Collect all IDs to move (folder + all its descendants)
+        const collectDescendantIds = (layerId: string): string[] => {
+            const ids: string[] = [layerId];
+            const layer = s.layers.find(l => l.id === layerId);
+            if (layer?.type === 'group') {
+                for (const childId of layer.childrenIds) {
+                    ids.push(...collectDescendantIds(childId));
+                }
+            }
+            return ids;
+        };
+
+        const movedIds = collectDescendantIds(movedLayerId);
+        if (movedIds.length === 0) return {};
+
+        // Remove all moved layers from the array
+        const remaining = s.layers.filter(l => !movedIds.includes(l.id));
+
+        // Find insertion point
+        if (!targetLayerId) {
+            // Move to end
+            return { layers: [...remaining, ...movedIds.map(id => s.layers.find(l => l.id === id)!).filter(Boolean)] };
+        }
+
+        const targetIdx = remaining.findIndex(l => l.id === targetLayerId);
+        if (targetIdx === -1) return {};
+
+        const insertAt = position === 'after' ? targetIdx + 1 : targetIdx;
+        const movedLayers = movedIds.map(id => s.layers.find(l => l.id === id)!).filter(Boolean);
+        remaining.splice(insertAt, 0, ...movedLayers);
+        return { layers: remaining };
     }),
 
     setLayers: (layers) => set({ layers }),

@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { fabric } from 'fabric';
 import { useEditorStore, ROOT_LAYER_ID, Layer } from '../../store/editorStore';
 
@@ -29,11 +29,41 @@ function searchGroupRecursive(group: fabric.Group, id: string): fabric.Object | 
     return null;
 }
 
+/** Collect all leaf (fabric object) layer IDs in tree order from a folder.
+ *  Order is determined by the flat layers array, reflecting drag-drop reordering. */
+function collectLeafIds(folderId: string, layers: Layer[], result: string[] = []): string[] {
+    const folder = layers.find(l => l.id === folderId);
+    if (!folder) return result;
+    if (folder.type === 'group') {
+        const children = layers.filter(l => l.parentId === folder.id);
+        for (const child of children) {
+            collectLeafIds(child.id, layers, result);
+        }
+    } else {
+        result.push(folderId);
+    }
+    return result;
+}
+
+/** Sync canvas z-order to match tree order: top of tree = rendered on top */
 function syncCanvasOrder(canvas: fabric.Canvas, layers: Layer[]) {
-    const flat = layers.filter(l => l.parentId === null);
-    for (let i = flat.length - 1; i >= 0; i--) {
-        const obj = findObjectById(canvas, flat[i].id);
-        if (obj) canvas.moveTo(obj, flat.length - 1 - i);
+    const topFolders = layers.filter(l => l.parentId === null);
+
+    const orderedLeafIds: string[] = [];
+    for (const folder of topFolders) {
+        collectLeafIds(folder.id, layers, orderedLeafIds);
+    }
+
+    // orderedLeafIds[0] = top of tree → should render on TOP
+    // canvas renders: objects[0]=bottom, objects[last]=top
+    // So orderedLeafIds[0] → canvas[length-1]
+    // orderedLeafIds[last] → canvas[0]
+    for (let i = 0; i < orderedLeafIds.length; i++) {
+        const obj = findObjectById(canvas, orderedLeafIds[i]);
+        if (obj) {
+            const targetIdx = orderedLeafIds.length - 1 - i;
+            canvas.moveTo(obj, targetIdx);
+        }
     }
     canvas.renderAll();
 }
@@ -53,10 +83,7 @@ interface LayerRowProps {
     onRenameChange: (name: string) => void;
     onRenameSubmit: () => void;
     onRenameCancel: () => void;
-    onDragStart: (e: React.DragEvent, index: number) => void;
-    onDragOver: (e: React.DragEvent, index: number) => void;
-    onDrop: (e: React.DragEvent, index: number) => void;
-    onDragEnd: (e: React.DragEvent) => void;
+    onDrop: (e: React.DragEvent, layerId: string) => void;
 }
 
 function LayerRow({
@@ -74,17 +101,29 @@ function LayerRow({
     onRenameChange,
     onRenameSubmit,
     onRenameCancel,
-    onDragStart,
-    onDragOver,
     onDrop,
-    onDragEnd,
 }: LayerRowProps) {
     const childrenLayers = allLayers.filter(l => l.parentId === layer.id);
     const isGroup = layer.type === 'group';
     const hasChildren = isGroup && childrenLayers.length > 0;
     const isEditing = editingId === layer.id;
     const isCollapsed = collapsedGroups.has(layer.id);
-    const flatIndex = allLayers.findIndex(l => l.id === layer.id);
+
+    const handleDragStart = useCallback((e: React.DragEvent) => {
+        e.dataTransfer.setData('text/plain', layer.id);
+        e.dataTransfer.effectAllowed = 'move';
+    }, [layer.id]);
+
+    const handleDragOver = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+    }, []);
+
+    const handleDropOn = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onDrop(e, layer.id);
+    }, [layer.id, onDrop]);
 
     const handleContextMenu = useCallback((e: React.MouseEvent) => {
         e.preventDefault();
@@ -92,15 +131,16 @@ function LayerRow({
         onStartRename(layer.id, layer.name || '');
     }, [layer.id, layer.name, onStartRename]);
 
+    const icon = isGroup ? (isCollapsed ? '📁' : '📂') : '✏️';
+
     return (
         <div>
             <div
                 draggable
                 onClick={() => onSelect(layer.id)}
-                onDragStart={(e) => onDragStart(e, flatIndex)}
-                onDragOver={(e) => onDragOver(e, flatIndex)}
-                onDrop={(e) => onDrop(e, flatIndex)}
-                onDragEnd={onDragEnd}
+                onDragStart={handleDragStart}
+                onDragOver={handleDragOver}
+                onDrop={handleDropOn}
                 onContextMenu={handleContextMenu}
                 className={`group flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm transition-all cursor-pointer select-none
                     ${selectedLayerId === layer.id
@@ -120,9 +160,7 @@ function LayerRow({
                     <span className="w-4 text-center text-xs text-slate-500">⏤</span>
                 )}
 
-                <span className="shrink-0 text-xs">
-                    {isGroup ? '📁' : '✏️'}
-                </span>
+                <span className="shrink-0 text-xs">{icon}</span>
 
                 {isEditing ? (
                     <input
@@ -178,10 +216,7 @@ function LayerRow({
                             onRenameChange={onRenameChange}
                             onRenameSubmit={onRenameSubmit}
                             onRenameCancel={onRenameCancel}
-                            onDragStart={onDragStart}
-                            onDragOver={onDragOver}
                             onDrop={onDrop}
-                            onDragEnd={onDragEnd}
                         />
                     ))}
                 </div>
@@ -191,37 +226,45 @@ function LayerRow({
 }
 
 export default function LayersPanel({ fabricCanvasRef }: LayersPanelProps) {
-    const { layers, selectedLayerId, selectLayer, updateLayerName, toggleLayerVisibility, reorderLayers } = useEditorStore();
+    const { layers, selectedLayerId, selectLayer, updateLayerName, toggleLayerVisibility, reorderFolder } = useEditorStore();
     const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
     const [rootCollapsed, setRootCollapsed] = useState(false);
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editingName, setEditingName] = useState('');
-    const dragIndex = useRef<number | null>(null);
 
     const rootLayers = layers.filter(l => l.parentId === null);
 
-const handleSelect = (id: string) => {
-    const canvas = fabricCanvasRef.current;
-    selectLayer(id);
-    if (!canvas) return;
+    const handleSelect = (id: string) => {
+        const canvas = fabricCanvasRef.current;
+        selectLayer(id);
+        if (!canvas) return;
 
-    if (id === ROOT_LAYER_ID) {
-        canvas.discardActiveObject();
-    } else {
-        const obj = findObjectById(canvas, id);
-        if (obj) {
+        if (id === ROOT_LAYER_ID) {
             canvas.discardActiveObject();
-            // Nếu là đối tượng nằm trong Group, cần active thông qua parent group hoặc set active target
-            if (obj.group) {
-                (obj.group as any).subTargetCheck = true;
-            }
-            canvas.setActiveObject(obj);
         } else {
-            canvas.discardActiveObject();
+            // Try to find a fabric object with this ID
+            let obj = findObjectById(canvas, id);
+
+            // If no fabric object found, this is a group folder — select its first child leaf
+            if (!obj) {
+                const firstLeafId = collectLeafIds(id, layers)[0];
+                if (firstLeafId) {
+                    obj = findObjectById(canvas, firstLeafId);
+                }
+            }
+
+            if (obj) {
+                canvas.discardActiveObject();
+                if (obj.group) {
+                    (obj.group as any).subTargetCheck = true;
+                }
+                canvas.setActiveObject(obj);
+            } else {
+                canvas.discardActiveObject();
+            }
         }
-    }
-    canvas.requestRenderAll();
-};
+        canvas.requestRenderAll();
+    };
 
     const handleToggleVisibility = (id: string) => {
         toggleLayerVisibility(id);
@@ -232,18 +275,7 @@ const handleSelect = (id: string) => {
         if (!afterToggle) return;
         const newVisible = afterToggle.visible;
 
-        const collectLeafIds = (layerId: string, acc: string[] = []): string[] => {
-            const l = layers.find(x => x.id === layerId);
-            if (!l) return acc;
-            if (l.type === 'group') {
-                l.childrenIds.forEach(cid => collectLeafIds(cid, acc));
-            } else {
-                acc.push(layerId);
-            }
-            return acc;
-        };
-
-        const leafIds = collectLeafIds(id);
+        const leafIds = collectLeafIds(id, useEditorStore.getState().layers);
 
         leafIds.forEach(lid => {
             const obj = findObjectById(canvas, lid);
@@ -282,28 +314,33 @@ const handleSelect = (id: string) => {
         setEditingName('');
     };
 
-    const handleDragStart = (e: React.DragEvent, index: number) => {
-        dragIndex.current = index;
-        e.dataTransfer.effectAllowed = 'move';
-        e.dataTransfer.setData('text/plain', String(index));
-    };
-
-    const handleDragOver = (e: React.DragEvent) => {
+    const handleDrop = (e: React.DragEvent, targetLayerId: string) => {
         e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-    };
+        const movedId = e.dataTransfer.getData('text/plain');
+        if (!movedId || movedId === targetLayerId) return;
 
-    const handleDrop = (e: React.DragEvent, dropIdx: number) => {
-        e.preventDefault();
-        const fromIdx = dragIndex.current;
-        if (fromIdx === null || fromIdx === dropIdx) return;
-        
-        reorderLayers(fromIdx, dropIdx);
         const canvas = fabricCanvasRef.current;
+
+        const movedLayer = layers.find(l => l.id === movedId);
+        const targetLayer = layers.find(l => l.id === targetLayerId);
+        if (!movedLayer || !targetLayer) return;
+
+        // Only allow reordering items that share the same parent
+        if (movedLayer.parentId !== targetLayer.parentId) return;
+
+        // Get siblings (same parent) in current flat array order
+        const siblings = layers.filter(l => l.parentId === movedLayer.parentId);
+        const movedIdx = siblings.findIndex(l => l.id === movedId);
+        const targetIdx = siblings.findIndex(l => l.id === targetLayerId);
+        if (movedIdx === -1 || targetIdx === -1) return;
+
+        const position = movedIdx < targetIdx ? 'after' : 'before';
+
+        reorderFolder(movedId, targetLayerId, position);
+
         if (canvas) {
             syncCanvasOrder(canvas, useEditorStore.getState().layers);
         }
-        dragIndex.current = null;
     };
 
     return (
@@ -351,10 +388,7 @@ const handleSelect = (id: string) => {
                                         onRenameChange={setEditingName}
                                         onRenameSubmit={handleRenameSubmit}
                                         onRenameCancel={() => setEditingId(null)}
-                                        onDragStart={handleDragStart}
-                                        onDragOver={handleDragOver}
                                         onDrop={handleDrop}
-                                        onDragEnd={() => { dragIndex.current = null; }}
                                     />
                                 ))
                             )}

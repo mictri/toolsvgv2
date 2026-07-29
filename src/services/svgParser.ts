@@ -94,7 +94,6 @@ function parseSvgDimensions(svgRoot: Element): { width: number; height: number }
     return { width: 800, height: 600 };
 }
 
-/** Flatten nested groups — extract all leaf objects recursively */
 function flattenObjects(objs: fabric.Object[]): fabric.Object[] {
     const result: fabric.Object[] = [];
     for (const obj of objs) {
@@ -108,7 +107,6 @@ function flattenObjects(objs: fabric.Object[]): fabric.Object[] {
     return result;
 }
 
-/** Ensure leaf objects have a visible fill */
 function ensureFill(obj: fabric.Object) {
     if (obj.type === 'group') {
         (obj as fabric.Group).getObjects().forEach(ensureFill);
@@ -123,6 +121,75 @@ function ensureFill(obj: fabric.Object) {
     obj.set('visible', true);
 }
 
+const LEAF_TAGS = new Set(['path', 'rect', 'circle', 'ellipse', 'polygon', 'polyline', 'line', 'text', 'image']);
+const SKIP_TAGS = new Set(['style', 'defs', 'desc', 'title', 'metadata', 'script']);
+
+interface DomNode {
+    /** data-fcv-idx assigned to the original DOM element for matching */
+    elementIdx: number;
+    tag: string;
+    children: DomNode[];
+}
+
+/** Assign data-fcv-idx to every renderable SVG element. Returns a map: index → Element. */
+function assignTreeIndices(root: Element): Map<number, Element> {
+    const idxMap = new Map<number, Element>();
+    let counter = 0;
+
+    function walk(el: Element) {
+        const tag = el.tagName.toLowerCase();
+        if (SKIP_TAGS.has(tag)) return;
+        const idx = counter++;
+        el.setAttribute('data-fcv-idx', String(idx));
+        idxMap.set(idx, el);
+        if (tag === 'g') {
+            for (const child of Array.from(el.children)) {
+                walk(child as Element);
+            }
+        }
+    }
+
+    for (const child of Array.from(root.children)) {
+        walk(child as Element);
+    }
+    return idxMap;
+}
+
+/** Walk the SVG DOM (which already has data-fcv-idx) and build a tree of DomNodes. */
+function buildDomTree(root: Element): DomNode[] {
+    const topNodes: DomNode[] = [];
+
+    function walk(parentEl: Element, parentNode?: DomNode): void {
+        for (let i = 0; i < parentEl.children.length; i++) {
+            const el = parentEl.children[i] as Element;
+            const tag = el.tagName.toLowerCase();
+            if (SKIP_TAGS.has(tag)) continue;
+
+            const idxAttr = el.getAttribute('data-fcv-idx');
+            if (idxAttr === null) continue;
+
+            const node: DomNode = {
+                elementIdx: parseInt(idxAttr, 10),
+                tag,
+                children: [],
+            };
+
+            if (tag === 'g') {
+                walk(el, node);
+            }
+
+            if (parentNode) {
+                parentNode.children.push(node);
+            } else {
+                topNodes.push(node);
+            }
+        }
+    }
+
+    walk(root);
+    return topNodes;
+}
+
 export async function parseSvgString(svgString: string, folderName?: string): Promise<SvgParseResult> {
     const parser = new DOMParser();
     const doc = parser.parseFromString(svgString, 'image/svg+xml');
@@ -133,10 +200,17 @@ export async function parseSvgString(svgString: string, folderName?: string): Pr
     const cssRules = parseCssStyles(svgRoot);
     inlineCssStyles(svgRoot, cssRules);
 
+    // Step 1: Assign data-fcv-idx to every renderable element (modifies svgRoot in-place)
+    const idxToSvgElement = assignTreeIndices(svgRoot);
+
+    // Step 2: Build DOM tree from indexed elements
+    const domTree = buildDomTree(svgRoot);
+
     const modifiedSvg = new XMLSerializer().serializeToString(svgRoot);
 
     return new Promise((resolve, reject) => {
-        const layerInfoMap = new Map<fabric.Object, { originalId: string }>();
+        // Maps: data-fcv-idx (from fabric's re-parsed elements) → fabric.Object
+        const idxToFabricObject = new Map<number, fabric.Object>();
 
         fabric.loadSVGFromString(modifiedSvg, (rawObjects) => {
             try {
@@ -145,70 +219,42 @@ export async function parseSvgString(svgString: string, folderName?: string): Pr
                     return;
                 }
 
-                // Flatten all nested groups into a single-level array
                 const flat = flattenObjects(rawObjects.filter(Boolean));
                 if (flat.length === 0) {
                     reject(new Error('No valid objects extracted'));
                     return;
                 }
 
-                // Ensure every object has a visible fill
                 flat.forEach(ensureFill);
 
                 const typeCounters: TypeCounter = {};
                 const layers: Layer[] = [];
                 const resultObjects: fabric.Object[] = [];
 
-                // Set origin to center for all objects
+                // Assign IDs to fabric objects and match via data-fcv-idx
+                const fabricIdToObj = new Map<string, fabric.Object>();
                 flat.forEach(obj => {
-                    obj.set({ originX: 'center', originY: 'center' });
-                    obj.setCoords();
-                });
-
-                const nextName = (objType: string, originalId: string): string => {
-                    if (originalId) return originalId;
-                    const label = shapeTypeLabel(objType);
-                    typeCounters[label] = (typeCounters[label] || 0) + 1;
-                    return `${label} ${typeCounters[label]}`;
-                };
-
-                // Assign IDs and prepare objects
-                flat.forEach(obj => {
-                    const info = layerInfoMap.get(obj);
-                    const originalId = info?.originalId || '';
                     const id = crypto.randomUUID();
                     (obj as any).id = id;
-                    obj.set('data', { id, originalId });
+                    obj.set('data', { id, originalId: '' });
                     obj.set({ selectable: true, evented: true, hasControls: true, hasBorders: true, visible: true });
                     obj.setCoords();
+                    fabricIdToObj.set(id, obj);
+                    resultObjects.push(obj);
+
+                    // Find matching SVG element by data-fcv-idx
+                    const svgEl = idxToSvgElement.get((obj as any).__fcvIdx);
+                    if (svgEl) {
+                        const origId = svgEl.getAttribute('id') || '';
+                        obj.get('data')!.originalId = origId;
+                    }
                 });
 
-                // Compute bounding box center
-                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-                flat.forEach(obj => {
-                    const rect = obj.getBoundingRect(true, true);
-                    if (rect.left < minX) minX = rect.left;
-                    if (rect.top < minY) minY = rect.top;
-                    if (rect.left + rect.width > maxX) maxX = rect.left + rect.width;
-                    if (rect.top + rect.height > maxY) maxY = rect.top + rect.height;
-                });
-                const cx = (minX + maxX) / 2;
-                const cy = (minY + maxY) / 2;
-                const offsetX = 175 - cx;
-                const offsetY = 175 - cy;
-
-                // Center all objects at artboard center (175, 175)
-                flat.forEach(obj => {
-                    obj.set({
-                        left: (obj.left || 0) + offsetX,
-                        top: (obj.top || 0) + offsetY,
-                    });
-                    obj.setCoords();
-                });
-
-                // Folder layer for the imported SVG
+                // ── Build DOM-based hierarchical layers ──
                 const folderId = crypto.randomUUID();
-                const childIds = flat.map(o => (o as any).id as string);
+                const folderChildIds: string[] = [];
+
+                // Top-level folder for this SVG file
                 layers.push({
                     id: folderId,
                     name: folderName || 'Imported SVG',
@@ -217,25 +263,77 @@ export async function parseSvgString(svgString: string, folderName?: string): Pr
                     locked: false,
                     parentId: null,
                     originalId: '',
-                    childrenIds: childIds,
-                });
-                // Sub-layers for each child
-                childIds.forEach((cid, i) => {
-                    const obj = flat[i];
-                    const info = layerInfoMap.get(obj);
-                    layers.push({
-                        id: cid,
-                        name: (info?.originalId) || nextName(obj.type || 'svg', ''),
-                        type: obj.type === 'path' ? 'path' : 'svg',
-                        visible: true,
-                        locked: false,
-                        parentId: folderId,
-                        originalId: info?.originalId || '',
-                        childrenIds: [],
-                    });
+                    childrenIds: folderChildIds,
                 });
 
-                resultObjects.push(...flat);
+                // Helper: find fabric object IDs by data-fcv-idx
+                const findLeafIdsByIndex = (idx: number): string[] => {
+                    const obj = idxToFabricObject.get(idx);
+                    return obj ? [(obj as any).id] : [];
+                };
+
+                const nextName = (objType: string, originalId: string): string => {
+                    if (originalId) return originalId;
+                    const label = shapeTypeLabel(objType);
+                    typeCounters[label] = (typeCounters[label] || 0) + 1;
+                    return `${label} ${typeCounters[label]}`;
+                };
+
+                function processDomNode(
+                    node: DomNode,
+                    parentLayerId: string,
+                    parentChildIds: string[],
+                ): void {
+                    const tag = node.tag;
+
+                    if (tag === 'g') {
+                        const gid = crypto.randomUUID();
+                        const origEl = idxToSvgElement.get(node.elementIdx);
+                        const origId = origEl?.getAttribute('id') || '';
+                        const name = origId || origEl?.getAttribute('data-name') || 'Group';
+                        const childIds: string[] = [];
+
+                        layers.push({
+                            id: gid,
+                            name,
+                            type: 'group',
+                            visible: true,
+                            locked: false,
+                            parentId: parentLayerId,
+                            originalId: origId,
+                            childrenIds: childIds,
+                        });
+                        parentChildIds.push(gid);
+
+                        for (const child of node.children) {
+                            processDomNode(child, gid, childIds);
+                        }
+                    } else if (LEAF_TAGS.has(tag)) {
+                        const leafIds = findLeafIdsByIndex(node.elementIdx);
+                        for (const leafId of leafIds) {
+                            const obj = fabricIdToObj.get(leafId)!;
+                            const data = obj.get('data') as any;
+                            const name = data?.originalId || nextName(tag, '');
+
+                            layers.push({
+                                id: leafId,
+                                name,
+                                type: tag === 'path' ? 'path' : 'svg',
+                                visible: true,
+                                locked: false,
+                                parentId: parentLayerId,
+                                originalId: data?.originalId || '',
+                                childrenIds: [],
+                            });
+                            parentChildIds.push(leafId);
+                        }
+                    }
+                }
+
+                // Process each top-level node in DOM tree order
+                for (const node of domTree) {
+                    processDomNode(node, folderId, folderChildIds);
+                }
 
                 resolve({ objects: resultObjects, layers, svgWidth, svgHeight });
             } catch (err) {
@@ -243,9 +341,12 @@ export async function parseSvgString(svgString: string, folderName?: string): Pr
                 reject(err);
             }
         }, (element: SVGElement, object: fabric.Object) => {
-            if (element && object) {
-                const originalId = element.getAttribute('id') || '';
-                layerInfoMap.set(object, { originalId });
+            // Read data-fcv-idx from re-parsed element and store on fabric object
+            const idx = element.getAttribute('data-fcv-idx');
+            if (idx !== null) {
+                const numIdx = parseInt(idx, 10);
+                (object as any).__fcvIdx = numIdx;
+                idxToFabricObject.set(numIdx, object);
             }
         });
     });

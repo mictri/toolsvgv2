@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useEffect } from 'react';
 import { fabric } from 'fabric';
-import { AnimatedObject } from '../../store/editorStore';
+import { AnimatedObject, useEditorStore } from '../../store/editorStore';
 import { serializeCanvas } from '../../services/svgSerializer';
 import { compileToGsapCode } from './gsapCompiler';
 import { generateExportHTML, downloadFile, ExportOptions } from './htmlExporter';
@@ -19,6 +19,7 @@ const SCROLL_START_OPTIONS = [
 ];
 
 export default function ExportModal({ fabricCanvas, animatedObjects, onClose }: ExportModalProps) {
+    const { canvasConfig } = useEditorStore();
     const [format, setFormat] = useState<'complete' | 'snippet'>('complete');
     const [triggerType, setTriggerType] = useState<ExportOptions['triggerType']>('auto');
     const [scrollStart, setScrollStart] = useState('top 80%');
@@ -34,16 +35,17 @@ export default function ExportModal({ fabricCanvas, animatedObjects, onClose }: 
         loop,
         minify,
         bgColor,
+        width: canvasConfig.width,
     };
 
     const svgString = useMemo(() => {
         if (!fabricCanvas || fabricCanvas.getObjects().length === 0) return '';
         try {
-            return serializeCanvas(fabricCanvas);
+            return serializeCanvas(fabricCanvas, { width: canvasConfig.width, height: canvasConfig.height });
         } catch {
             return '';
         }
-    }, [fabricCanvas]);
+    }, [fabricCanvas, canvasConfig.width, canvasConfig.height]);
 
     const gsapCode = useMemo(() => {
         const scrollOptions = triggerType === 'scroll' ? { start: scrollStart } : undefined;

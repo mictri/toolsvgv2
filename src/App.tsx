@@ -9,12 +9,14 @@ import { fabric } from 'fabric';
 import { parseSvgString, readSvgFile } from './services/svgParser';
 import { serializeCanvas, downloadSvg } from './services/svgSerializer';
 import { exportProjectJson, downloadJson } from './services/animationExporter';
+import { saveProject, openProject } from './services/projectSerializer';
 
 export default function App() {
     const { loadFromStorage } = useEditorStore();
     const [canvasInstance, setCanvasInstance] = useState<fabric.Canvas | null>(null);
     const fabricCanvasRef = useRef<fabric.Canvas | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const projectInputRef = useRef<HTMLInputElement>(null);
     const [showExportMenu, setShowExportMenu] = useState(false);
     const [showExportModal, setShowExportModal] = useState(false);
     const exportMenuRef = useRef<HTMLDivElement>(null);
@@ -37,23 +39,43 @@ export default function App() {
         try {
             const svgString = await readSvgFile(file);
             const folderName = file.name.replace(/\.svg$/i, '');
-            const { objects, layers: newLayers } = await parseSvgString(svgString, folderName);
+            const { objects, layers: newLayers, svgWidth, svgHeight } = await parseSvgString(svgString, folderName);
             
             if (!objects || objects.length === 0) return;
 
-            canvas.clear();
-            canvas.setBackgroundColor('#000000', () => {});
+            if (canvas.getObjects().length === 0) {
+                // First import: set canvas dimensions to match SVG
+                const w = svgWidth || 800;
+                const h = svgHeight || 600;
+                canvas.setWidth(w);
+                canvas.setHeight(h);
+                canvas.setBackgroundColor('#000000', () => {});
+                useEditorStore.getState().updateCanvasConfig({ width: w, height: h });
+            }
 
+            // Add new fabric objects to canvas
             objects.forEach(obj => {
                 canvas.add(obj);
                 obj.setCoords();
             });
 
+            // Append new layers EXISTING layers (new SVG folder goes BELOW existing)
+            const existingLayers = useEditorStore.getState().layers;
+            const allLayers = [...existingLayers, ...newLayers];
+            useEditorStore.getState().setLayers(allLayers);
+
+            // Move new objects to the BACK of canvas z-order (behind existing objects)
+            // so first-imported SVG stays rendered on top
+            const existingCount = canvas.getObjects().length - objects.length;
+            if (existingCount > 0) {
+                objects.forEach((obj, i) => {
+                    canvas.moveTo(obj, i);
+                });
+            }
+
             canvas.discardActiveObject();
             canvas.calcOffset();
             canvas.renderAll();
-
-            useEditorStore.getState().setLayers(newLayers);
 
             // Select first imported object
             if (objects[0]) {
@@ -76,7 +98,8 @@ export default function App() {
     const handleExportSvg = () => {
         const canvas = fabricCanvasRef.current;
         if (!canvas || canvas.getObjects().length === 0) { alert('Canvas is empty.'); return; }
-        const svg = serializeCanvas(canvas);
+        const { canvasConfig } = useEditorStore.getState();
+        const svg = serializeCanvas(canvas, { width: canvasConfig.width, height: canvasConfig.height });
         downloadSvg(svg, 'pro-animation.svg');
         setShowExportMenu(false);
     };
@@ -95,6 +118,33 @@ export default function App() {
         setShowExportModal(true);
     };
 
+    const handleSaveProject = async () => {
+        const canvas = fabricCanvasRef.current;
+        const state = useEditorStore.getState();
+        const defaultName = state.layers.length > 0 ? state.layers[0].name : 'Untitled';
+        const name = window.prompt('Save project as:', defaultName);
+        if (name && name.trim()) {
+            await saveProject(canvas, name.trim());
+        }
+    };
+
+    const handleOpenProject = async (file: File) => {
+        const canvas = fabricCanvasRef.current;
+        if (!canvas) return;
+        try {
+            await openProject(file, canvas);
+        } catch (err) {
+            console.error('Open project failed:', err);
+            alert('Failed to open project file. Make sure the file is valid (.prosvg).');
+        }
+    };
+
+    const handleProjectFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (file) handleOpenProject(file);
+        e.target.value = '';
+    };
+
     return (
         <div className="flex h-screen flex-col bg-slate-900 text-slate-100 font-sans">
             {/* Top Header Bar */}
@@ -104,6 +154,16 @@ export default function App() {
                     <span className="rounded-full bg-indigo-500/10 px-2 py-0.5 text-xs font-medium text-indigo-400 border border-indigo-500/20">Studio v1.0</span>
                 </div>
                 <div className="flex items-center gap-3">
+                    <input ref={projectInputRef} type="file" accept=".prosvg" onChange={handleProjectFileSelect} className="hidden" />
+                    <button onClick={() => projectInputRef.current?.click()}
+                        className="flex items-center gap-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 px-3 py-1.5 text-xs font-medium text-slate-300 transition-colors">
+                        📂 Open Project
+                    </button>
+                    <button onClick={handleSaveProject}
+                        className="flex items-center gap-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 px-3 py-1.5 text-xs font-medium text-slate-300 transition-colors">
+                        💾 Save
+                    </button>
+                    <div className="w-px h-5 bg-slate-700/50" />
                     <input ref={fileInputRef} type="file" accept=".svg" onChange={handleFileSelect} className="hidden" />
                     <button onClick={() => fileInputRef.current?.click()}
                         className="flex items-center gap-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 px-3 py-1.5 text-xs font-medium text-slate-300 transition-colors">
