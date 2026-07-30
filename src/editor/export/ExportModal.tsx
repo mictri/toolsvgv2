@@ -3,7 +3,8 @@ import { fabric } from 'fabric';
 import { AnimatedObject, useEditorStore } from '../../store/editorStore';
 import { serializeCanvas } from '../../services/svgSerializer';
 import { compileToGsapCode } from './gsapCompiler';
-import { generateExportHTML, downloadFile, ExportOptions } from './htmlExporter';
+import { generateExportHTML, downloadFile, ExportOptions, injectSvgIdsAndBuildMap } from './htmlExporter';
+import { getActiveTimeline } from '../timeline/timelineCompiler';
 
 interface ExportModalProps {
     fabricCanvas: fabric.Canvas | null;
@@ -19,7 +20,7 @@ const SCROLL_START_OPTIONS = [
 ];
 
 export default function ExportModal({ fabricCanvas, animatedObjects, onClose }: ExportModalProps) {
-    const { canvasConfig } = useEditorStore();
+    const { canvasConfig: { width, height, backgroundColor, preserveAspectRatio, isTransparent } } = useEditorStore();
     const [format, setFormat] = useState<'complete' | 'snippet'>('complete');
     const [triggerType, setTriggerType] = useState<ExportOptions['triggerType']>('auto');
     const [scrollStart, setScrollStart] = useState('top 80%');
@@ -27,6 +28,7 @@ export default function ExportModal({ fabricCanvas, animatedObjects, onClose }: 
     const [minify, setMinify] = useState(false);
     const [bgColor, setBgColor] = useState('#0f172a');
     const [copied, setCopied] = useState(false);
+    const [exportHtml, setExportHtml] = useState('');
 
     const options: ExportOptions = {
         format,
@@ -35,22 +37,10 @@ export default function ExportModal({ fabricCanvas, animatedObjects, onClose }: 
         loop,
         minify,
         bgColor,
-        width: canvasConfig.width,
+        width,
     };
 
-    const svgString = useMemo(() => {
-        if (!fabricCanvas || fabricCanvas.getObjects().length === 0) return '';
-        try {
-            return serializeCanvas(fabricCanvas, { width: canvasConfig.width, height: canvasConfig.height });
-        } catch {
-            return '';
-        }
-    }, [fabricCanvas, canvasConfig.width, canvasConfig.height]);
-
-    const gsapCode = useMemo(() => {
-        const scrollOptions = triggerType === 'scroll' ? { start: scrollStart } : undefined;
-        return compileToGsapCode(animatedObjects, triggerType, scrollOptions, loop);
-    }, [animatedObjects, triggerType, scrollStart, loop]);
+    const scrollOptions = triggerType === 'scroll' ? { start: scrollStart } : undefined;
 
     const idMapping = useMemo(() => {
         if (!fabricCanvas) return [];
@@ -59,10 +49,65 @@ export default function ExportModal({ fabricCanvas, animatedObjects, onClose }: 
         })).filter(m => m.dataId);
     }, [fabricCanvas]);
 
-    const exportHtml = useMemo(() => {
-        if (!svgString) return '';
-        return generateExportHTML(svgString, gsapCode, options, idMapping);
-    }, [svgString, gsapCode, options, idMapping]);
+    useEffect(() => {
+    if (!fabricCanvas || fabricCanvas.getObjects().length === 0) {
+        setExportHtml('');
+        return;
+    }
+
+    const tl = getActiveTimeline();
+    const savedTime = tl ? tl.time() : 0;
+
+    // 1. Reset timeline về 0
+    if (tl) tl.seek(0);
+
+    // 2. Reset d attribute đối với các Morph Objects về initial state
+    fabricCanvas.getObjects().forEach((obj: any) => {
+        if (obj.originalPathData) {
+            obj.set('path', obj.originalPathData);
+        }
+    });
+
+    fabricCanvas.renderAll();
+
+    try {
+        const rawSvg = serializeCanvas(fabricCanvas, {
+            width,
+            height,
+            preserveAspectRatio,
+            backgroundColor,
+            isTransparent,
+        });
+
+        // 3. Truyền animatedObjects vào để lọc không tạo thẻ <g> dư
+        const { processedSvg, idMap } = injectSvgIdsAndBuildMap(rawSvg, idMapping, animatedObjects);
+
+        const gsapCode = compileToGsapCode(animatedObjects, triggerType, scrollOptions, loop, idMap);
+        const html = generateExportHTML(processedSvg, gsapCode, options);
+        setExportHtml(html);
+    } catch (err) {
+        console.error("Export Modal Error:", err);
+        setExportHtml('');
+    } finally {
+        if (tl) tl.seek(savedTime);
+        fabricCanvas.renderAll();
+    }
+}, [
+    fabricCanvas, 
+    animatedObjects, 
+    triggerType, 
+    scrollStart, 
+    loop, 
+    minify, 
+    bgColor, 
+    width, 
+    height, 
+    backgroundColor, 
+    preserveAspectRatio, 
+    isTransparent, 
+    idMapping,
+    format
+]);
 
     const handleCopy = useCallback(() => {
         if (!exportHtml) return;
@@ -211,9 +256,9 @@ export default function ExportModal({ fabricCanvas, animatedObjects, onClose }: 
                         <div className="flex items-center justify-between px-5 py-2 border-t border-slate-800 shrink-0 bg-slate-950/30">
                             <span className="text-[10px] text-slate-600">
                                 {animatedObjects.length} animated object{animatedObjects.length !== 1 ? 's' : ''}
-                                {svgString ? ` · ${(new Blob([exportHtml]).size / 1024).toFixed(1)} KB` : ''}
+                                {exportHtml ? ` · ${(new Blob([exportHtml]).size / 1024).toFixed(1)} KB` : ''}
                             </span>
-                            <span className="text-[10px] text-slate-600">{exportHtml.split('\n').length} lines</span>
+                            <span className="text-[10px] text-slate-600">{exportHtml ? exportHtml.split('\n').length : 0} lines</span>
                         </div>
                     </div>
                 </div>

@@ -44,7 +44,7 @@ const calculatePathLength = (obj: any): number => {
     return 0;
 };
 
-function CanvasPropertiesGroup({ fabricCanvas }: RightSidebarProps) {
+function CanvasPropertiesGroup() {
     const { canvasConfig, updateCanvasConfig } = useEditorStore();
     const [aspectLocked, setAspectLocked] = useState(false);
     const [wStr, setWStr] = useState(String(canvasConfig.width));
@@ -121,15 +121,11 @@ function CanvasPropertiesGroup({ fabricCanvas }: RightSidebarProps) {
                     <label className="text-[10px] text-slate-500 flex items-center gap-1">
                         <input type="checkbox" checked={!canvasConfig.isTransparent}
                             onChange={() => {
-                                updateCanvasConfig({ isTransparent: !canvasConfig.isTransparent });
-                                const c = fabricCanvas && 'current' in fabricCanvas ? fabricCanvas.current : fabricCanvas;
-                                if (c) {
-                                    if (!canvasConfig.isTransparent) {
-                                        c.setBackgroundColor(null as any, () => c.renderAll());
-                                    } else {
-                                        c.setBackgroundColor(canvasConfig.backgroundColor, () => c.renderAll());
-                                    }
-                                }
+                                const next = !canvasConfig.isTransparent;
+                                updateCanvasConfig({ isTransparent: next });
+                                window.dispatchEvent(new CustomEvent('update-artboard-bg', {
+                                    detail: { color: next ? null : canvasConfig.backgroundColor }
+                                }));
                             }}
                             className="rounded border-slate-700 bg-slate-900 text-indigo-500 focus:ring-indigo-500" />
                         Solid Background
@@ -141,10 +137,9 @@ function CanvasPropertiesGroup({ fabricCanvas }: RightSidebarProps) {
                             onChange={(e) => {
                                 const color = e.target.value;
                                 updateCanvasConfig({ backgroundColor: color });
-                                const c = fabricCanvas && 'current' in fabricCanvas ? fabricCanvas.current : fabricCanvas;
-                                if (c) {
-                                    c.setBackgroundColor(color, () => c.renderAll());
-                                }
+                                window.dispatchEvent(new CustomEvent('update-artboard-bg', {
+                                    detail: { color }
+                                }));
                             }}
                             className="w-8 h-8 rounded bg-transparent cursor-pointer border-0 p-0" />
                         <span className="text-[10px] font-mono text-slate-400 uppercase">{canvasConfig.backgroundColor}</span>
@@ -160,10 +155,10 @@ function CanvasPropertiesGroup({ fabricCanvas }: RightSidebarProps) {
                     <select value={canvasConfig.preserveAspectRatio}
                         onChange={(e) => updateCanvasConfig({ preserveAspectRatio: e.target.value })}
                         className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500 mt-1">
+                        <option value="none">none</option>
                         <option value="xMidYMid meet">xMidYMid meet</option>
                         <option value="xMinYMin meet">xMinYMin meet</option>
                         <option value="xMaxYMax meet">xMaxYMax meet</option>
-                        <option value="none">none</option>
                     </select>
                 </div>
             </div>
@@ -241,12 +236,31 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
             const obj = findObjectById(activeCanvas, selectedLayerId);
             const baseState = obj ? {
                 left: obj.left || 0, top: obj.top || 0, scaleX: obj.scaleX || 1, scaleY: obj.scaleY || 1,
-                angle: obj.angle || 0, opacity: obj.opacity ?? 1, fill: (obj.fill as string) || '#000000', stroke: (obj.stroke as string) || ''
+                angle: obj.angle || 0, opacity: obj.opacity ?? 1, fill: (obj.fill as string) || undefined, stroke: (obj.stroke as string) || undefined,
             } : undefined;
             addPropertyTrack(selectedLayerId, propTrack, baseState);
         } else if (!ao.tracks.find(t => t.property === propTrack)) {
             addPropertyTrack(selectedLayerId, propTrack);
         }
+
+        // For rotate: if the track has NO keyframes yet, always create a
+        // starting keyframe at 0s with baseState angle (default = 0°).
+        // This ensures animation goes FROM 0° TO the target angle, preserving
+        // the user's CCW/CW direction intent (e.g. -45° → 0° is CCW).
+        // Without this, the first keyframe captures the already-rotated angle
+        // at time 0, and GSAP may tween the wrong direction.
+        const currentAo = useEditorStore.getState().animatedObjects.find(a => a.id === selectedLayerId);
+        const currentTrack = currentAo?.tracks.find(t => t.property === propTrack);
+        if (propTrack === 'rotate' && currentTrack && currentTrack.keyframes.length === 0) {
+            const startAngle = currentAo?.baseState?.angle ?? 0;
+            addKeyframeToTrack(selectedLayerId, propTrack, 0, startAngle, 'power2.out');
+            if (currentTime > 0) {
+                addKeyframeToTrack(selectedLayerId, propTrack, currentTime, value, 'power2.out');
+            }
+            compileTimeline(useEditorStore.getState().animatedObjects, activeCanvas);
+            return;
+        }
+
         addKeyframeToTrack(selectedLayerId, propTrack, currentTime, value, 'power2.out');
         compileTimeline(useEditorStore.getState().animatedObjects, activeCanvas);
     };
@@ -465,7 +479,7 @@ export default function RightSidebar({ fabricCanvas }: RightSidebarProps) {
     };
 
     if (!selectedLayerId || selectedLayerId === ROOT_LAYER_ID) {
-        return <CanvasPropertiesGroup fabricCanvas={fabricCanvas} />;
+        return <CanvasPropertiesGroup />;
     }
 
     const SectionHeader = ({ id, title }: { id: keyof typeof sections, title: string }) => (

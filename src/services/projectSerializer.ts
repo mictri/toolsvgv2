@@ -108,10 +108,17 @@ export function openProject(
                             });
                         }
 
-                        canvas.setBackgroundColor(
-                            storedState.canvasConfig?.backgroundColor || '#000000',
-                            () => {},
-                        );
+                        // Ensure loaded artboard stays at the back
+                        const loadedArtboard = canvas.getObjects().find((o: any) => o.data?.fcvArtboard);
+                        if (loadedArtboard) canvas.sendToBack(loadedArtboard);
+
+                        // Update artboard background via event (preserves dark editor canvas bg)
+                        const bgColor = storedState.canvasConfig?.backgroundColor || '#ffffff';
+                        const isTransparent = storedState.canvasConfig?.isTransparent ?? false;
+                        window.dispatchEvent(new CustomEvent('update-artboard-bg', {
+                            detail: { color: isTransparent ? null : bgColor },
+                        }));
+
                         canvas.calcOffset();
                         canvas.renderAll();
 

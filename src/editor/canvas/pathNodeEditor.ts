@@ -153,7 +153,7 @@ export function updatePathHandle(
 
 /** Create a fabric.Path from a raw path string suitable for Node tool operations */
 export function rebuildPath(pathObj: fabric.Path): void {
-    pathObj.set({ path: pathObj.path as any });
+    pathObj.set({ path: (pathObj.path || []).slice() as any });
     pathObj.setCoords();
 }
 
@@ -243,14 +243,16 @@ export function setNodeType(
 
     // --- rebuild path commands from modified anchors ---
     const newCmds = anchorsToCmds(anchors, isClosed);
-    pathObj.path = newCmds as any;
 
     // --- persist user-set node type ---
     const stored = ((pathObj as any).__nodeTypes = (pathObj as any).__nodeTypes || {});
     stored[nodeIndex] = nodeType;
 
-    // Re-apply to fabric
-    pathObj.set({ path: pathObj.path as any });
+    // Re-apply to fabric via set() — using newCmds.slice() ensures the
+    // reference differs from pathObj.path, forcing Fabric's _setPathInfo()
+    // to recalculate width/height/pathOffset. Without this, objectCaching
+    // uses stale bounding box and nodes beyond the original bounds get clipped.
+    pathObj.set({ path: newCmds.slice() as any });
     pathObj.setCoords();
 }
 

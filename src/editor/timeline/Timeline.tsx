@@ -193,8 +193,11 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
             scaleY: obj.scaleY || 1,
             angle: obj.angle || 0,
             opacity: obj.opacity ?? 1,
-            fill: (obj.fill as string) || '#000000',
-            stroke: (obj.stroke as string) || '',
+            fill: (obj.fill as string) || undefined,
+            stroke: (obj.stroke as string) || undefined,
+            strokeWidth: (obj as any).strokeWidth || undefined,
+            strokeDashOffset: (obj as any).strokeDashOffset || undefined,
+            strokeDashArray: (obj as any).strokeDashArray || undefined,
         } : undefined;
         addPropertyTrack(layerId, property, baseState);
         setShowAddProperty(false);
@@ -306,7 +309,7 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
             {/* === TIMELINE TRACKS === */}
             <div className="flex flex-col w-full bg-slate-900/20 rounded border border-slate-900 overflow-y-auto min-h-0">
                 {/* Ruler Header */}
-                <div className="flex w-full border-b border-slate-900 bg-slate-950/40 text-[10px] text-slate-500 font-mono h-6 items-center">
+                <div className="flex w-full border-b border-slate-900 bg-slate-950/90 text-[10px] text-slate-500 font-mono h-6 items-center sticky top-0 z-10">
                     <div className="w-64 px-3 font-semibold border-r border-slate-900 text-[11px] shrink-0">Animation</div>
                     <div className="flex-1 relative h-full overflow-hidden" style={{ zoom: timelineZoom / 100 }}>
                         {timeMarkers.map((t, i) => (
@@ -425,16 +428,22 @@ export default function Timeline({ fabricCanvas }: TimelineProps) {
                                                         e.preventDefault();
                                                         const obj = fabricCanvas?.getObjects().find(o => ((o as any).id === ao.id || o.data?.id === ao.id));
                                                         if (obj && ao.baseState) {
-                                                            obj.set({
+                                                            const restore: Record<string, any> = {
+                                                                originX: 'left',
+                                                                originY: 'top',
                                                                 left: ao.baseState.left,
                                                                 top: ao.baseState.top,
                                                                 scaleX: ao.baseState.scaleX,
                                                                 scaleY: ao.baseState.scaleY,
                                                                 angle: ao.baseState.angle,
                                                                 opacity: ao.baseState.opacity,
-                                                                fill: ao.baseState.fill,
-                                                                stroke: ao.baseState.stroke,
-                                                            });
+                                                            };
+                                                            if (ao.baseState.fill !== undefined) restore.fill = ao.baseState.fill;
+                                                            if (ao.baseState.stroke !== undefined) restore.stroke = ao.baseState.stroke;
+                                                            if (ao.baseState.strokeWidth !== undefined) restore.strokeWidth = ao.baseState.strokeWidth;
+                                                            if (ao.baseState.strokeDashOffset !== undefined) restore.strokeDashOffset = ao.baseState.strokeDashOffset;
+                                                            if (ao.baseState.strokeDashArray !== undefined) restore.strokeDashArray = ao.baseState.strokeDashArray;
+                                                            obj.set(restore);
                                                             obj.setCoords();
                                                             fabricCanvas?.renderAll();
                                                         }

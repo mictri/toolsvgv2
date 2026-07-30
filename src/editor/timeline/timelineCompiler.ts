@@ -94,12 +94,14 @@ export const compileTimeline = (
         yoyo = true;
     }
 
-    // Force center origin
+    // Force center origin — adjust left/top to keep visual position
     for (const ao of animatedObjects) {
         const obj = fabricCanvas.getObjects().find((o: any) => o.data?.id === ao.id);
-        if (obj) {
-            obj.set('originX', 'center');
-            obj.set('originY', 'center');
+        if (obj && (obj.originX !== 'center' || obj.originY !== 'center')) {
+            const adjLeft = (obj.left || 0) + (obj.width || 0) * (obj.scaleX || 1) / 2;
+            const adjTop = (obj.top || 0) + (obj.height || 0) * (obj.scaleY || 1) / 2;
+            obj.set({ originX: 'center', originY: 'center', left: adjLeft, top: adjTop });
+            obj.setCoords();
         }
     }
 

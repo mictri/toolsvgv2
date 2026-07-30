@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { fabric } from 'fabric';
 import { useEditorStore, ROOT_LAYER_ID, Layer } from '../../store/editorStore';
 
@@ -65,6 +65,11 @@ function syncCanvasOrder(canvas: fabric.Canvas, layers: Layer[]) {
             canvas.moveTo(obj, targetIdx);
         }
     }
+
+    // Keep artboard rect at the bottom
+    const artboard = canvas.getObjects().find((obj: any) => obj.data?.fcvArtboard);
+    if (artboard) canvas.sendToBack(artboard);
+
     canvas.renderAll();
 }
 
@@ -84,6 +89,7 @@ interface LayerRowProps {
     onRenameSubmit: () => void;
     onRenameCancel: () => void;
     onDrop: (e: React.DragEvent, layerId: string) => void;
+    onDelete?: (layer: Layer) => void;
 }
 
 function LayerRow({
@@ -102,6 +108,7 @@ function LayerRow({
     onRenameSubmit,
     onRenameCancel,
     onDrop,
+    onDelete,
 }: LayerRowProps) {
     const childrenLayers = allLayers.filter(l => l.parentId === layer.id);
     const isGroup = layer.type === 'group';
@@ -195,6 +202,13 @@ function LayerRow({
                 >
                     {layer.visible ? '👁️' : '👁️‍🗨️'}
                 </button>
+                <button
+                    onClick={(e) => { e.stopPropagation(); onDelete?.(layer); }}
+                    className="text-xs text-slate-600 hover:text-red-400 transition-colors shrink-0 px-1 opacity-0 group-hover:opacity-100"
+                    title="Delete"
+                >
+                    🗑️
+                </button>
             </div>
 
             {isGroup && hasChildren && !isCollapsed && (
@@ -226,7 +240,7 @@ function LayerRow({
 }
 
 export default function LayersPanel({ fabricCanvasRef }: LayersPanelProps) {
-    const { layers, selectedLayerId, selectLayer, updateLayerName, toggleLayerVisibility, reorderFolder } = useEditorStore();
+    const { layers, selectedLayerId, selectLayer, updateLayerName, toggleLayerVisibility, reorderFolder, removeLayerWithDescendants, setPendingUndoFabricData } = useEditorStore();
     const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
     const [rootCollapsed, setRootCollapsed] = useState(false);
     const [editingId, setEditingId] = useState<string | null>(null);
@@ -343,6 +357,57 @@ export default function LayersPanel({ fabricCanvasRef }: LayersPanelProps) {
         }
     };
 
+    const collectChildIds = useCallback((parentId: string, layers: Layer[], acc: string[] = []): string[] => {
+        const children = layers.filter(l => l.parentId === parentId);
+        for (const child of children) {
+            acc.push(child.id);
+            collectChildIds(child.id, layers, acc);
+        }
+        return acc;
+    }, []);
+
+    const handleDeleteLayer = useCallback((layer: Layer) => {
+        const childIds = collectChildIds(layer.id, layers);
+        const isGroupWithChildren = layer.type === 'group' && childIds.length > 0;
+
+        if (isGroupWithChildren) {
+            const msg = `Are you sure you want to delete "${layer.name || 'Untitled'}" and all ${childIds.length} item(s) inside?\n\nThis action cannot be undone.`;
+            if (!window.confirm(msg)) return;
+        }
+
+        const canvas = fabricCanvasRef.current;
+        if (canvas) {
+            setPendingUndoFabricData(canvas.toJSON(['data', 'id']));
+            const allIds = [layer.id, ...childIds];
+            allIds.forEach(lid => {
+                const obj = findObjectById(canvas, lid);
+                if (obj) canvas.remove(obj);
+            });
+            canvas.renderAll();
+        }
+
+        removeLayerWithDescendants(layer.id);
+    }, [layers, fabricCanvasRef, removeLayerWithDescendants, collectChildIds, setPendingUndoFabricData]);
+
+    // Keyboard handler for Delete/Backspace
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Delete' || e.key === 'Backspace') {
+                const state = useEditorStore.getState();
+                const selId = state.selectedLayerId;
+                if (!selId || selId === ROOT_LAYER_ID) return;
+                const selLayer = state.layers.find(l => l.id === selId);
+                if (!selLayer) return;
+                // Don't trigger if editing a rename input
+                if (document.activeElement?.tagName === 'INPUT') return;
+                e.preventDefault();
+                handleDeleteLayer(selLayer);
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [handleDeleteLayer]);
+
     return (
         <aside className="w-64 shrink-0 border-r border-slate-800 bg-slate-950/30 p-4 flex flex-col gap-4 overflow-hidden">
             <h2 className="text-xs font-bold uppercase tracking-widest text-slate-400 shrink-0">Layers Tree</h2>
@@ -389,6 +454,7 @@ export default function LayersPanel({ fabricCanvasRef }: LayersPanelProps) {
                                         onRenameSubmit={handleRenameSubmit}
                                         onRenameCancel={() => setEditingId(null)}
                                         onDrop={handleDrop}
+                                        onDelete={handleDeleteLayer}
                                     />
                                 ))
                             )}

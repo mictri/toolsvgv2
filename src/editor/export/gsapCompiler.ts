@@ -1,4 +1,5 @@
 import { AnimatedObject } from '../../store/editorStore';
+import { IdMapEntry } from './htmlExporter';
 
 function toJsValue(key: string, value: any): string {
     if (key === 'ease') return `"${value}"`;
@@ -72,13 +73,30 @@ export function mapKeyframeToGsapProps(propName: string, value: any): Record<str
     }
 }
 
-function getSelector(objectId: string, property: string): string {
-    const isGroupTransform = [
-        'position', 'left', 'top',
-        'rotate', 'rotation',
-        'scale', 'skew',
-    ].includes(property);
-    return isGroupTransform ? `#fcv-${objectId}` : `#fcv-${objectId} path`;
+/**
+ * Phân cấp Target Selector dựa trên IdMap (Hoàn toàn không sử dụng đuôi "-transform"):
+ * 1. Cấp CHA (Outside): POSITION -> #fcv-{objectId}
+ * 2. Cấp TRUNG GIAN: ROTATE, ROTATION, SCALE, SKEW -> #{transformId} (ID độc lập riêng)
+ * 3. Cấp CON (Path/Shape inner): OPACITY, STROKE, FILL, MORPH -> #fcv-{objectId} path
+ */
+function getSelector(objectId: string, property: string, transformIdMap?: Map<string, string>): string {
+    // Cấp Cha - Position
+    if (['position', 'left', 'top'].includes(property)) {
+        return `#fcv-${objectId}`;
+    }
+
+    // Cấp Trung Gian - Transform (Rotate, Scale, Skew)
+    if (['rotate', 'rotation', 'scale', 'skew'].includes(property)) {
+        const customTransformId = transformIdMap?.get(objectId);
+        if (customTransformId) {
+            return `#${customTransformId}`;
+        }
+        // Trường hợp không có map thì gắn thẳng vào ID chính
+        return `#fcv-${objectId}`;
+    }
+
+    // Cấp Con Inner - Properties khác
+    return `#fcv-${objectId} path`;
 }
 
 export function compileToGsapCode(
@@ -86,12 +104,19 @@ export function compileToGsapCode(
     triggerType: string = 'auto',
     scrollOptions?: { start?: string },
     enableLoop: boolean = true,
+    idMapEntries?: IdMapEntry[],
 ): string {
     const lines: string[] = [];
-
     const useScrollTrigger = triggerType === 'scroll';
-
     const tlConfig: Record<string, any> = {};
+
+    // Tạo Map tra cứu nhanh transformId theo dataId
+    const transformMap = new Map<string, string>();
+    if (idMapEntries) {
+        for (const entry of idMapEntries) {
+            transformMap.set(entry.dataId, entry.transformId);
+        }
+    }
 
     if (useScrollTrigger) {
         tlConfig.scrollTrigger = {
@@ -109,7 +134,6 @@ export function compileToGsapCode(
     }
 
     const tlConfigStr = toJsLiteral(tlConfig);
-
     lines.push(`const tl = gsap.timeline(${tlConfigStr});`);
     lines.push('');
 
@@ -120,7 +144,8 @@ export function compileToGsapCode(
             if (!track.enabled || track.keyframes.length < 2) continue;
 
             const sorted = [...track.keyframes].sort((a, b) => a.time - b.time);
-            const selector = getSelector(ao.id, track.property);
+            const selector = getSelector(ao.id, track.property, transformMap);
+            const isPosition = ['position', 'left', 'top'].includes(track.property);
 
             lines.push(`// ${ao.objectName} — ${track.property}`);
 
@@ -130,14 +155,25 @@ export function compileToGsapCode(
                 const segDuration = +(next.time - curr.time).toFixed(2);
                 if (segDuration <= 0) continue;
 
-                const props = mapKeyframeToGsapProps(track.property, next.value);
-                props.duration = segDuration;
-                props.ease = next.easing || 'power2.out';
-
-                const varsStr = toJsLiteral(props);
+                const ease = next.easing || 'power2.out';
                 const startTime = curr.time.toFixed(2);
 
-                lines.push(`tl.to("${selector}", ${varsStr}, ${startTime});`);
+                if (isPosition) {
+                    const posProps = mapKeyframeToGsapProps(track.property, next.value);
+                    const posX = posProps.x ?? 0;
+                    const posY = posProps.y ?? 0;
+
+                    lines.push(
+                        `tl.to("${selector}", { attr: { transform: createMatrixString("${selector}", ${posX}, ${posY}) }, duration: ${segDuration}, ease: "${ease}" }, ${startTime});`
+                    );
+                } else {
+                    const props = mapKeyframeToGsapProps(track.property, next.value);
+                    props.duration = segDuration;
+                    props.ease = ease;
+
+                    const varsStr = toJsLiteral(props);
+                    lines.push(`tl.to("${selector}", ${varsStr}, ${startTime});`);
+                }
             }
         }
     }

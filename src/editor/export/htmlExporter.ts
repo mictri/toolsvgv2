@@ -8,6 +8,14 @@ export interface ExportOptions {
     width?: number;
 }
 
+/**
+ * Bảng ánh xạ ID độc lập cho từng lớp layer
+ */
+export interface IdMapEntry {
+    dataId: string;       // ID gốc của đối tượng (dành cho Position)
+    transformId: string;  // Unique ID độc lập cho Transform (Rotate, Scale, Skew)
+}
+
 function minifyCode(code: string): string {
     return code
         .replace(/\/\/.*$/gm, '')
@@ -26,24 +34,88 @@ function cleanSvg(svg: string): string {
         .trim();
 }
 
-function injectSvgIds(svgString: string, idMapping: { dataId: string }[]): string {
-    let result = svgString;
+/**
+ * Hàm sinh Unique ID ngắn gọn/độc lập
+ */
+function generateUniqueId(): string {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+        return crypto.randomUUID().slice(0, 8);
+    }
+    return Math.random().toString(36).substring(2, 10);
+}
 
-    result = result.replace(/\sid="(?!fcv-)([^"]+)"/gi, (_, idVal) => ` id="fcv-${idVal}"`);
+/**
+ * Tự động chèn ID với tiền tố "fcv-" chuẩn xác cho SVG DOM:
+ * - Cấp Cha (Position): id="fcv-{dataId}"
+ * - Cấp Transform (Rotate/Scale/Skew): id="fcv-tr-{uniqueId}"
+ * - Cấp Inner (Path/Shape): giữ nguyên thẻ con
+ */
+export function injectSvgIdsAndBuildMap(
+    svgString: string,
+    idMapping: { dataId: string }[],
+    animatedObjects: AnimatedObject[] = []
+): { processedSvg: string; idMap: IdMapEntry[] } {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(svgString, 'image/svg+xml');
+    const resultIdMap: IdMapEntry[] = [];
 
     for (const m of idMapping) {
         if (!m.dataId) continue;
-        const escapedId = m.dataId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const alreadyHasId = new RegExp(`<[a-zA-Z]+[^>]*?data-id="${escapedId}"[^>]*?id=`, 'i');
-        if (alreadyHasId.test(result)) continue;
-        const noIdRegex = new RegExp(
-            `(<[a-zA-Z]+[^>]*?data-id="${escapedId}")([^>]*?>)`,
-            'g',
-        );
-        result = result.replace(noIdRegex, '$1 id="fcv-' + m.dataId + '"$2');
+        const rawId = m.dataId;
+        const cleanDataId = rawId.replace(/^fcv-/, '');
+        const targetPosId = `fcv-${cleanDataId}`;
+
+        // Tìm element tương ứng trong SVG
+        let element = doc.querySelector(`[data-id="${cleanDataId}"]`) || 
+                      doc.querySelector(`[data-id="${rawId}"]`) ||
+                      doc.querySelector(`[id="${cleanDataId}"]`) ||
+                      doc.querySelector(`[id="${rawId}"]`);
+
+        if (element) {
+            element.setAttribute('id', targetPosId);
+            element.setAttribute('data-id', cleanDataId);
+
+            // Kiểm tra các animation gán vào object này
+            const animObj = animatedObjects.find(
+                a => (a.id || a.dataId) === cleanDataId || (a.id || a.dataId) === rawId
+            );
+
+            // Xác định xem có cần thẻ <g id="fcv-tr-..."> riêng hay không
+            // Nếu chỉ có 1 animation (Animate, Morph, Scale, Skew, ...) thì KHÔNG tạo thẻ dư
+            // const hasMultipleTransforms = animObj && animObj.tracks && animObj.tracks.length > 1;
+            const hasMultipleTransforms = animObj && animObj.tracks && animObj.tracks.length > 1;
+
+if (hasMultipleTransforms) {
+    const transformUniqueId = `fcv-tr-${generateUniqueId()}`;
+    
+    // Tạo thẻ <g id="fcv-tr-...">
+    const transformGroup = doc.createElementNS('http://www.w3.org/2000/svg', 'g');
+    transformGroup.setAttribute('id', transformUniqueId);
+
+    // Chuyển toàn bộ element con vào transformGroup
+    while (element.firstChild) {
+        transformGroup.appendChild(element.firstChild);
+    }
+    element.appendChild(transformGroup);
+
+    resultIdMap.push({
+        dataId: cleanDataId,
+        transformId: transformUniqueId,
+    });
+} else {
+    resultIdMap.push({
+        dataId: cleanDataId,
+        transformId: targetPosId,
+    });
+}
+        }
     }
 
-    return result;
+    const serializer = new XMLSerializer();
+    return {
+        processedSvg: serializer.serializeToString(doc.documentElement),
+        idMap: resultIdMap,
+    };
 }
 
 function wrapSvg(svg: string): string {
@@ -59,9 +131,27 @@ function buildScriptBlock(gsapCode: string, triggerType: string): string {
         .join('\n');
 
     const isScroll = triggerType === 'scroll';
+    const hasPositionEffect = gsapCode.includes('createMatrixString');
 
     const lines: string[] = [];
     lines.push(`  <script>`);
+
+    if (hasPositionEffect) {
+        lines.push(`    function createMatrixString(targetSelector, newX, newY) {`);
+        lines.push(`      const el = typeof targetSelector === 'string' ? document.querySelector(targetSelector) : targetSelector;`);
+        lines.push(`      if (!el) return "";`);
+        lines.push(`      const transformAttr = el.getAttribute("transform") || "";`);
+        lines.push(`      const match = transformAttr.match(/matrix\\(([^)]+)\\)/);`);
+        lines.push(`      if (match) {`);
+        lines.push(`        const values = match[1].trim().split(/[\\s,]+/).map(Number);`);
+        lines.push(`        const [a, b, c, d] = values;`);
+        lines.push(`        return \`matrix(\${a}, \${b}, \${c}, \${d}, \${newX}, \${newY})\`;`);
+        lines.push(`      }`);
+        lines.push(`      return \`translate(\${newX}, \${newY})\`;`);
+        lines.push(`    }`);
+        lines.push(``);
+    }
+
     lines.push(`    document.addEventListener("DOMContentLoaded", function () {`);
 
     if (isScroll) {
@@ -75,7 +165,6 @@ function buildScriptBlock(gsapCode: string, triggerType: string): string {
     lines.push(``);
     lines.push(indentedJs);
 
-    // Event handlers for hover/click
     if (triggerType === 'hover') {
         lines.push(``);
         lines.push(`        const el = document.querySelector("#animation-svg");`);
@@ -108,13 +197,8 @@ export function generateExportHTML(
     svgString: string,
     gsapCode: string,
     options: ExportOptions,
-    idMapping?: { dataId: string }[],
 ): string {
     let finalSvg = cleanSvg(svgString);
-    if (idMapping && idMapping.length > 0) {
-        finalSvg = injectSvgIds(finalSvg, idMapping);
-    }
-
     const wrappedSvg = wrapSvg(finalSvg);
     const processedJs = options.minify ? minifyCode(gsapCode) : gsapCode;
     const scriptBlock = buildScriptBlock(processedJs, options.triggerType);
@@ -141,9 +225,7 @@ export function generateExportHTML(
         return [wrappedSvg, '', scriptBlock].join('\n');
     }
 
-    // ── Complete HTML ──
-
-    if (isScroll) {
+if (isScroll) {
         // Scroll layout with spacers
         const html = `<html lang="en">
 <head>
@@ -208,7 +290,7 @@ export function generateExportHTML(
         return html;
     }
 
-    // Centered layout (auto, hover, click)
+    
     const html = `<html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -227,7 +309,7 @@ export function generateExportHTML(
     #animation-svg {
       width: 100%;
       max-width: ${options.width || 800}px;
-      padding: 24px;
+      background: rgba(0,0,0,0.2);
     }
     #animation-svg svg {
       width: 100%;

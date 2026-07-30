@@ -133,8 +133,11 @@ export interface BaseState {
     scaleY: number;
     angle: number;
     opacity: number;
-    fill: string;
-    stroke: string;
+    fill?: string;
+    stroke?: string;
+    strokeWidth?: number;
+    strokeDashOffset?: number;
+    strokeDashArray?: number[] | null;
 }
 
 export interface AnimatedObject {
@@ -149,6 +152,8 @@ export interface AnimatedObject {
 
 interface HistorySnapshot {
     layers: Layer[];
+    animatedObjects: AnimatedObject[];
+    fabricData?: any;
 }
 
 export interface CanvasConfig {
@@ -205,10 +210,12 @@ interface EditorState {
     // ===== NHÓM 3: History =====
     undoStack: HistorySnapshot[];
     redoStack: HistorySnapshot[];
+    pendingUndoFabricData: any;
 
     // ===== ACTIONS =====
     addLayer: (layer: LayerInput) => void;
     removeLayer: (id: string) => void;
+    removeLayerWithDescendants: (id: string) => void;
     selectLayer: (id: string | null) => void;
     toggleLayerVisibility: (id: string) => void;
     updateLayerName: (layerId: string, newName: string) => void;
@@ -255,6 +262,7 @@ interface EditorState {
 
     undo: () => void;
     redo: () => void;
+    setPendingUndoFabricData: (data: any) => void;
 }
 
 const STORAGE_KEY = 'pro-svg-animator-project';
@@ -265,7 +273,7 @@ const initialState = {
     activeTool: 'transform',
     selectedObjectIds: [] as string[],
     activeObjectProperties: null as ActiveObjectProperties | null,
-    canvasConfig: { width: 350, height: 350, backgroundColor: '#ffffff', isTransparent: false, preserveAspectRatio: 'xMidYMid meet' } as CanvasConfig,
+    canvasConfig: { width: 350, height: 350, backgroundColor: '#ffffff', isTransparent: false, preserveAspectRatio: 'none' } as CanvasConfig,
     isCanvasInitialized: false,
     zoom: 1,
     isPlaying: false,
@@ -282,10 +290,15 @@ const initialState = {
     starInnerRatio: 0.5,
     undoStack: [] as HistorySnapshot[],
     redoStack: [] as HistorySnapshot[],
+    pendingUndoFabricData: null,
 };
 
-function captureSnapshot(layers: Layer[]): HistorySnapshot {
-    return { layers: JSON.parse(JSON.stringify(layers)) };
+function captureSnapshot(layers: Layer[], animatedObjects?: AnimatedObject[], fabricData?: any): HistorySnapshot {
+    return {
+        layers: JSON.parse(JSON.stringify(layers)),
+        animatedObjects: animatedObjects ? JSON.parse(JSON.stringify(animatedObjects)) : [],
+        fabricData,
+    };
 }
 export const useEditorStore = create<EditorState>((set, get) => ({
     ...initialState,
@@ -297,12 +310,39 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
     removeLayer: (id) => {
         const state = get();
-        const snapshot = captureSnapshot(state.layers);
+        const snapshot = captureSnapshot(state.layers, state.animatedObjects, state.pendingUndoFabricData);
         set((s) => ({
             layers: s.layers.filter((l) => l.id !== id),
             animatedObjects: s.animatedObjects.filter((ao) => ao.id !== id),
             selectedLayerId: s.selectedLayerId === id ? null : s.selectedLayerId,
             selectedKeyframeId: null,
+            pendingUndoFabricData: null,
+            undoStack: [...s.undoStack, snapshot],
+            redoStack: [],
+        }));
+    },
+
+    removeLayerWithDescendants: (id) => {
+        const state = get();
+        const snapshot = captureSnapshot(state.layers, state.animatedObjects, state.pendingUndoFabricData);
+
+        const collectChildIds = (parentId: string, acc: string[] = []): string[] => {
+            const children = state.layers.filter(l => l.parentId === parentId);
+            for (const child of children) {
+                acc.push(child.id);
+                collectChildIds(child.id, acc);
+            }
+            return acc;
+        };
+
+        const idsToRemove = new Set([id, ...collectChildIds(id)]);
+
+        set((s) => ({
+            layers: s.layers.filter(l => !idsToRemove.has(l.id)),
+            animatedObjects: s.animatedObjects.filter(ao => !idsToRemove.has(ao.id)),
+            selectedLayerId: idsToRemove.has(s.selectedLayerId ?? '') ? null : s.selectedLayerId,
+            selectedKeyframeId: null,
+            pendingUndoFabricData: null,
             undoStack: [...s.undoStack, snapshot],
             redoStack: [],
         }));
@@ -539,18 +579,25 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     })),
 
     // ===== HISTORY =====
+    setPendingUndoFabricData: (data) => set({ pendingUndoFabricData: data }),
+
     undo: () => {
         const state = get();
         if (state.undoStack.length === 0) return;
         const previousState = state.undoStack[state.undoStack.length - 1];
         const newUndoStack = state.undoStack.slice(0, -1);
-        const currentSnapshot = captureSnapshot(state.layers);
+        const currentSnapshot = captureSnapshot(state.layers, state.animatedObjects);
         set({
             layers: previousState.layers,
+            animatedObjects: previousState.animatedObjects || [],
             undoStack: newUndoStack,
             redoStack: [...state.redoStack, currentSnapshot],
             selectedLayerId: null,
         });
+        // Dispatch event so Canvas.tsx restores fabric objects
+        window.dispatchEvent(new CustomEvent('canvas-undo-restore', {
+            detail: { fabricData: previousState.fabricData },
+        }));
     },
 
     redo: () => {
@@ -558,13 +605,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         if (state.redoStack.length === 0) return;
         const nextState = state.redoStack[state.redoStack.length - 1];
         const newRedoStack = state.redoStack.slice(0, -1);
-        const currentSnapshot = captureSnapshot(state.layers);
+        const currentSnapshot = captureSnapshot(state.layers, state.animatedObjects);
         set({
             layers: nextState.layers,
+            animatedObjects: nextState.animatedObjects || [],
             undoStack: [...state.undoStack, currentSnapshot],
             redoStack: newRedoStack,
             selectedLayerId: null,
         });
+        window.dispatchEvent(new CustomEvent('canvas-undo-restore', {
+            detail: { fabricData: nextState.fabricData },
+        }));
     },
 
     // ===== LAYER NAME & REORDER =====

@@ -214,10 +214,17 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
             }
         };
         window.addEventListener('resize-artboard', handleResizeArtboard);
+        // Bind update-artboard-bg event
+        const handleArtboardBg = (e: Event) => {
+            const detail = (e as CustomEvent).detail;
+            controller.setArtboardBackground(detail?.color ?? null);
+        };
+        window.addEventListener('update-artboard-bg', handleArtboardBg);
         return () => {
             window.removeEventListener('timeline-scrub', handleScrub);
             window.removeEventListener('fit-canvas-viewport', handleFitViewport);
             window.removeEventListener('resize-artboard', handleResizeArtboard);
+            window.removeEventListener('update-artboard-bg', handleArtboardBg);
             controller.dispose();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -540,7 +547,7 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
         clearDraftIndicators();
         // Push undo snapshot
         const store = useEditorStore.getState();
-        const snapshot = { layers: JSON.parse(JSON.stringify(store.layers)) };
+        const snapshot = { layers: JSON.parse(JSON.stringify(store.layers)), animatedObjects: JSON.parse(JSON.stringify(store.animatedObjects)) };
         useEditorStore.setState({
             undoStack: [...store.undoStack, snapshot],
             redoStack: [],
@@ -1900,6 +1907,29 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
         };
     }, [activeTool, canvas, addLayer, setTool]);
 
+    // === UNDO/REDO FABRIC RESTORE ===
+    useEffect(() => {
+        const handleUndoRestore = async (e: Event) => {
+            const detail = (e as CustomEvent).detail;
+            if (!detail?.fabricData || !canvas) return;
+            const artboard = canvas.getObjects().find((o: any) => o.data?.fcvArtboard);
+            const toRemove = canvas.getObjects().filter((o: any) => !o.data?.fcvArtboard);
+            toRemove.forEach(o => canvas.remove(o));
+            if (detail.fabricData?.objects) {
+                const filtered = detail.fabricData.objects.filter((o: any) => !o.data?.fcvArtboard);
+                const objs = await new Promise<fabric.Object[]>((res) => {
+                    (fabric.util as any).enlivenObjects(filtered, (objs: fabric.Object[]) => res(objs));
+                });
+                objs.forEach(obj => canvas.add(obj));
+            }
+            if (artboard) canvas.sendToBack(artboard);
+            canvas.renderAll();
+            compileTimeline(useEditorStore.getState().animatedObjects, canvas);
+        };
+        window.addEventListener('canvas-undo-restore', handleUndoRestore);
+        return () => window.removeEventListener('canvas-undo-restore', handleUndoRestore);
+    }, [canvas]);
+
     // === KEYBOARD ===
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
@@ -1909,7 +1939,7 @@ export default function Canvas({ fabricCanvasRef, onCanvasReady }: CanvasProps) 
             if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) { e.preventDefault(); redo(); setTimeout(() => compileTimeline(useEditorStore.getState().animatedObjects, canvas), 10); return; }
             if (e.key === 'Delete' || e.key === 'Backspace') {
                 if (selectedKeyframeId) { e.preventDefault(); const s = useEditorStore.getState(); for (const ao2 of s.animatedObjects) { for (const trk of ao2.tracks) { if (trk.keyframes.some(k => k.id === selectedKeyframeId)) { s.removeKeyframeFromTrack(ao2.id, trk.property, selectedKeyframeId); break; } } } compileTimeline(useEditorStore.getState().animatedObjects, canvas); }
-                else if (selectedLayerId) { e.preventDefault(); const obj = canvas?.getObjects().find(o => o.data?.id === selectedLayerId); if (obj) { canvas?.remove(obj); canvas?.discardActiveObject().renderAll(); } removeLayer(selectedLayerId); compileTimeline(useEditorStore.getState().animatedObjects, canvas); }
+                else if (selectedLayerId) { e.preventDefault(); useEditorStore.getState().setPendingUndoFabricData(canvas?.toJSON(['data', 'id'])); const obj = canvas?.getObjects().find(o => o.data?.id === selectedLayerId); if (obj) { canvas?.remove(obj); canvas?.discardActiveObject().renderAll(); } removeLayer(selectedLayerId); compileTimeline(useEditorStore.getState().animatedObjects, canvas); }
             }
             if (e.key === 'v' || e.key === 'V') setTool('transform');
             if (e.key === 'h' || e.key === 'H') setTool(activeTool === 'hand' ? 'transform' : 'hand');

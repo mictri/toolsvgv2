@@ -64,9 +64,13 @@ export class CanvasController {
             width: CanvasController.ARTBOARD_WIDTH,
             height: CanvasController.ARTBOARD_HEIGHT,
             fill: '#FFFFFF',
+            stroke: 'rgba(255,255,255,0.25)',
+            strokeWidth: 1,
+            strokeDashArray: [6, 4] as any,
             selectable: false,
             evented: false,
         });
+        (rect as any).data = { fcvArtboard: true };
         this.canvas.add(rect);
         this.canvas.sendToBack(rect);
         this.artboardRect = rect;
@@ -92,10 +96,31 @@ export class CanvasController {
     }
 
     updateArtboardSize(width: number, height: number) {
-        if (!this.canvas || !this.artboardRect) return;
-        this.artboardRect.set({ width, height });
+        if (!this.canvas) return;
+        const rect = this.findArtboard() || this.artboardRect;
+        if (!rect) return;
+        rect.set({ width, height });
+        this.canvas.sendToBack(rect);
         this.canvas.renderAll();
         this.centerArtboard();
+        this.artboardRect = rect;
+    }
+
+    private findArtboard(): fabric.Rect | undefined {
+        return this.canvas?.getObjects().find((obj: any) =>
+            obj.type === 'rect' && obj.data?.fcvArtboard
+        ) as fabric.Rect | undefined;
+    }
+
+    setArtboardBackground(color: string | null) {
+        const rect = this.findArtboard() || this.artboardRect;
+        if (!rect) return;
+        rect.set({ fill: color || 'transparent' });
+        if (this.canvas) {
+            this.canvas.sendToBack(rect);
+            this.canvas.renderAll();
+        }
+        this.artboardRect = rect;
     }
 
     private updateControlsScale() {

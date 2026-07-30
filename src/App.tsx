@@ -44,13 +44,10 @@ export default function App() {
             if (!objects || objects.length === 0) return;
 
             if (canvas.getObjects().length === 0) {
-                // First import: set canvas dimensions to match SVG
                 const w = svgWidth || 800;
                 const h = svgHeight || 600;
-                canvas.setWidth(w);
-                canvas.setHeight(h);
-                canvas.setBackgroundColor('#000000', () => {});
                 useEditorStore.getState().updateCanvasConfig({ width: w, height: h });
+                window.dispatchEvent(new CustomEvent('resize-artboard', { detail: { width: w, height: h } }));
             }
 
             // Add new fabric objects to canvas
@@ -72,6 +69,10 @@ export default function App() {
                     canvas.moveTo(obj, i);
                 });
             }
+
+            // Ensure artboard rect stays at the very bottom
+            const artboard = canvas.getObjects().find((obj: any) => obj.data?.fcvArtboard);
+            if (artboard) canvas.sendToBack(artboard);
 
             canvas.discardActiveObject();
             canvas.calcOffset();
@@ -99,7 +100,13 @@ export default function App() {
         const canvas = fabricCanvasRef.current;
         if (!canvas || canvas.getObjects().length === 0) { alert('Canvas is empty.'); return; }
         const { canvasConfig } = useEditorStore.getState();
-        const svg = serializeCanvas(canvas, { width: canvasConfig.width, height: canvasConfig.height });
+        const svg = serializeCanvas(canvas, {
+            width: canvasConfig.width,
+            height: canvasConfig.height,
+            preserveAspectRatio: canvasConfig.preserveAspectRatio,
+            backgroundColor: canvasConfig.backgroundColor,
+            isTransparent: canvasConfig.isTransparent,
+        });
         downloadSvg(svg, 'pro-animation.svg');
         setShowExportMenu(false);
     };
