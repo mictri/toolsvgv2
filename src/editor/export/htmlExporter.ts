@@ -77,9 +77,9 @@ export function injectSvgIdsAndBuildMap(
             element.setAttribute('data-id', cleanDataId);
 
             // Kiểm tra các animation gán vào object này
-            const animObj = animatedObjects.find(
-                a => (a.id || a.dataId) === cleanDataId || (a.id || a.dataId) === rawId
-            );
+const animObj = animatedObjects.find(
+    (a: any) => (a.id || a.dataId) === cleanDataId || (a.id || a.dataId) === rawId
+);
 
             // Xác định xem có cần thẻ <g id="fcv-tr-..."> riêng hay không
             // Nếu chỉ có 1 animation (Animate, Morph, Scale, Skew, ...) thì KHÔNG tạo thẻ dư
