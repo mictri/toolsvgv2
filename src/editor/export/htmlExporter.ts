@@ -1,3 +1,4 @@
+import type { AnimatedObject } from '../../types';
 export interface ExportOptions {
     format: 'complete' | 'snippet';
     triggerType: 'auto' | 'scroll' | 'hover' | 'click';
